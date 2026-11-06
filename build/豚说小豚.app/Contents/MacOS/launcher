@@ -1,0 +1,14 @@
+#!/bin/sh
+# 豚说小豚 启动器（由 make_app.py 生成）
+PET_DIR="/Users/zhuan/WorkBuddy/2026-11-05-23-51-14/tunshuo-pet"
+PY="/Users/zhuan/.workbuddy/binaries/python/versions/3.13.12/bin/python3"
+LOG="$HOME/Library/Logs/tunshuo-pet.log"
+mkdir -p "$(dirname "$LOG")"
+
+# 单实例保护：已经在跑就不再开第二只
+if pgrep -f "$PET_DIR/tunshuo_pet_pro.py" >/dev/null 2>&1; then
+  exit 0
+fi
+
+cd "$PET_DIR" || exit 1
+exec "$PY" "$PET_DIR/tunshuo_pet_pro.py" >>"$LOG" 2>&1

@@ -1,0 +1,6 @@
+# Python 运行期缓存（不删文件，只是不纳入版本库）
+__pycache__/
+*.py[cod]
+
+# macOS 系统文件
+.DS_Store
