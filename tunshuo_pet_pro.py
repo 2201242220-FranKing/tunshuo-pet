@@ -194,8 +194,10 @@ class DataSource:
 
     def _mock(self):
         self.n += 1
+        # 固定 id 池：8 条常驻帖每次刷新内容会变，但 id 不变，不会被误判成新帖；
+        # 只有每两次出现的 "new-N" 才代表真的来了一条新动态。
         posts = [{
-            "id": "mock-%d-%d" % (i, random.randint(100, 999)),
+            "id": "mock-%d" % i,
             "title": random.choice(MOCK_POOL),
             "author": random.choice(MOCK_AUTHORS),
             "tag": random.choice(MOCK_TAGS),
@@ -205,7 +207,7 @@ class DataSource:
         } for i in range(8)]
         if self.n % 2 == 0:
             posts.insert(0, {
-                "id": "new-%d" % time.time(),
+                "id": "new-%d" % self.n,
                 "title": random.choice(MOCK_POOL),
                 "author": random.choice(MOCK_AUTHORS),
                 "tag": random.choice(MOCK_TAGS),
@@ -445,7 +447,9 @@ class PetWindow(QWidget):
             self.hide_pet()
 
     def _place_bottom_right(self):
-        scr = QApplication.primaryScreen().availableGeometry()
+        # 用宠物当前所在的屏幕，而不是永远用主屏（双屏时会跑错显示器）
+        scr = (QApplication.screenAt(self.frameGeometry().center())
+               or QApplication.primaryScreen()).availableGeometry()
         self.move(scr.right() - self.win_w - 40, scr.bottom() - self.win_h - 10)
 
     # ---------- 动作调度 ----------
@@ -860,19 +864,37 @@ class PetWindow(QWidget):
     # ---------- 数据 ----------
     def refresh(self):
         self._workers = [w for w in getattr(self, "_workers", []) if w.isRunning()]
+        if self._workers:            # 已有请求在跑：忽略重复点击，避免多次弹提醒
+            return
         w = Fetcher(self.source)
         w.ok.connect(self._on_posts)
         w.fail.connect(lambda m: self.say("拉取失败：%s" % m))
-        w.finished.connect(lambda: self._workers.remove(w) if w in self._workers else None)
+        w.finished.connect(lambda w=w: self._worker_done(w))
         self._workers.append(w)
         w.start()
+
+    def _worker_done(self, w):
+        if w in getattr(self, "_workers", []):
+            self._workers.remove(w)
+        w.deleteLater()
 
     def _on_posts(self, posts):
         self.posts = posts
         new = [p for p in posts if p["id"] not in self.seen]
         for p in posts:
             self.seen.add(p["id"])
-        self.first_load = False
+        # 只保留最近 200 个 id：长期轮询时 seen 不能无限增长
+        if len(self.seen) > 200:
+            self.seen = set(list(self.seen)[-200:])
+
+        if self.first_load:
+            # 首次加载只建立"已见过"基线，不弹气泡也不发系统通知，
+            # 否则 seen 为空时所有帖子都会被当成新帖。
+            self.first_load = False
+            if self.panel.isVisible():
+                self.panel.set_posts(posts)
+            return
+
         if new and not self.paused:
             top = max(new, key=lambda x: x["heat"])
             self.sleeping = False
@@ -993,7 +1015,9 @@ class HotPanel(QWidget):
             self.pet.say("这条是演示数据，还没有链接～")
 
     def show_near_pet(self):
-        scr = QApplication.primaryScreen().availableGeometry()
+        # 面板跟宠物所在的同一块屏幕对齐
+        scr = (QApplication.screenAt(self.pet.frameGeometry().center())
+               or QApplication.primaryScreen()).availableGeometry()
         x = self.pet.frameGeometry().left() - self.width() - 12
         if x < scr.left() + 8:
             x = min(self.pet.frameGeometry().right() + 12, scr.right() - self.width() - 8)
