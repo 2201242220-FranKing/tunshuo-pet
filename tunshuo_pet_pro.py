@@ -26,6 +26,8 @@ import sys
 import time
 import urllib.request
 
+import studio_sync as ss
+
 from PySide6.QtCore import (QAbstractAnimation, QEasingCurve, QPoint, QRectF,
                             QSize, Qt, QThread, QTimer, QVariantAnimation,
                             Signal)
@@ -48,6 +50,8 @@ DEFAULT_CONFIG = {
     "notify_system": True,
     "pet_width": 60,
     "idle_sleep_seconds": 180,   # 无操作多久后自己睡着（0 = 永不）
+    "studio_url": "http://127.0.0.1:8770",  # 形象工作台地址；留空 = 不联网同步
+    "studio_sync_seconds": 20,              # 拉取间隔（秒），最小 5
 }
 
 # 只放「运行时状态」：每次互动都会写，不入库。
@@ -56,6 +60,8 @@ DEFAULT_STATE = {"fish": 0}
 # 待机随机动作的间隔区间（秒）
 IDLE_INTERVAL_RANGE = (4.5, 11.0)
 IDLE_ACTIONS = ["sway", "sway", "look", "look", "stretch", "hop", "nod"]
+# 工作台默认的待机候选（其余 4 个动作只在互动时触发，不会自己播）
+IDLE_POOL = ["sway", "look", "stretch", "hop", "nod"]
 
 MOCK_POOL = [
     "【闲置】出一台9成新iPad Air5，带笔，可小刀",
@@ -248,6 +254,22 @@ class Fetcher(QThread):
             self.fail.emit(str(ex)[:80])
 
 
+class StudioFetcher(QThread):
+    """拉形象配置 + 下载配饰图片，全部放在线程里，绝不阻塞动画。"""
+    ok = Signal(dict)
+    fail = Signal(str)
+
+    def __init__(self, url):
+        super().__init__()
+        self.url = url
+
+    def run(self):
+        try:
+            self.ok.emit(ss.fetch(self.url))
+        except Exception as ex:
+            self.fail.emit(str(ex)[:80])
+
+
 # ----------------------------------------------------------------------
 class PetWindow(QWidget):
     """单窗口桌宠：精灵 + 内部气泡，永不新建窗口抢焦点。"""
@@ -277,6 +299,20 @@ class PetWindow(QWidget):
         self.paused = False
         self.first_load = True
         self.fish = int(self.state.get("fish", 0) or 0)
+
+        # 形象工作台：先用上一次的本地缓存启动（断网也能保持形象），
+        # 稍后再联网拉「已发布」配置。没接工作台时 studio 就是内置默认值。
+        self.studio = ss.load_cache()
+        if int(self.studio.get("revision", 0)) == 0:
+            # 从未同步过工作台：沿用 config.json 的老配置，保证升级后行为不变
+            self.studio["settings"]["notify"] = bool(cfg.get("notify_system", True))
+            try:
+                self.studio["settings"]["auto_sleep_seconds"] = int(cfg.get("idle_sleep_seconds", 180) or 0)
+            except (TypeError, ValueError):
+                pass
+        self.studio_acc = []
+        self.studio_url = str(cfg.get("studio_url") or "").strip()
+        self._studio_worker = None
 
         # 素材
         self.pm_open = self._load("pet.png")
@@ -369,7 +405,20 @@ class PetWindow(QWidget):
                 minutes = 3
             self.poll_timer.start(minutes * 60 * 1000)
 
-        QTimer.singleShot(1200, lambda: self.say("点我看看热帖～右键有菜单", 4200))
+        # 形象同步：独立于热帖轮询，默认 20 秒拉一次；工作台没开就静默用缓存
+        self.studio_timer = QTimer(self)
+        self.studio_timer.timeout.connect(self._studio_refresh)
+        self._apply_studio()
+        if self.studio_url:
+            try:
+                secs = max(5, int(cfg.get("studio_sync_seconds", 20)))
+            except (TypeError, ValueError):
+                secs = 20
+            self.studio_timer.start(secs * 1000)
+            QTimer.singleShot(900, self._studio_refresh)
+
+        QTimer.singleShot(1200, lambda: self.say(
+            self.studio["settings"]["greeting"], 4200))
 
     # ---------- 素材与遮罩 ----------
     def _load(self, name):
@@ -409,22 +458,40 @@ class PetWindow(QWidget):
         return self.pm_open
 
     def _act_rect(self):
-        """变换期间（跳动/倾斜/挤压）角色会超出正立轮廓，用一块留足余量的矩形兜住。
+        """变换期间的扩展遮罩：按「角色 + 所有配饰」的实际包围盒动态计算。
 
-        余量按最大旋转 30°、跳跃 30px 估算：60x80 的角色绕中心转 30° 后，
-        半宽从 30 涨到约 46、半高从 40 涨到约 50，所以左右各留 24px（半宽 54）、
-        上方留 110px、下方留 62px 才不会被窗口遮罩裁掉。
+        固定余量（左右 24px / 上 70px / 下 22px）只够覆盖原本 60x80 的角色
+        旋转 30°；配饰可以被工作台拖到角色外侧、整体还能放大 1.4 倍，
+        所以这里以角色中心为圆心求一个最小覆盖半径 R，旋转不会改变半径，
+        再并上基础矩形，配饰拖到任何位置都不会被窗口形状裁掉。
         """
-        return QRectF(max(0, self._pet_offset.x() - 24),
+        base = QRectF(max(0, self._pet_offset.x() - 24),
                       max(0, self._pet_offset.y() - 70),
                       self.pet_w + 48,
-                      self.pet_h + 92).toRect()
+                      self.pet_h + 92)
+        scale = getattr(self, "studio_scale", 1.0)
+        R = math.hypot(self.pet_w / 2.0, self.pet_h / 2.0) * scale
+        for a in getattr(self, "studio_acc", []):
+            hx = abs(a["x"] * self.pet_w) + a["lw"] / 2.0
+            hy = abs(a["y"] * self.pet_h) + a["lh"] / 2.0
+            R = max(R, math.hypot(hx, hy) * scale)
+        cx = self._pet_offset.x() + self.pet_w / 2.0
+        cy = self._pet_offset.y() + self.pet_h / 2.0
+        # hop 动作会让整体上移约 58px，向上多留 64px
+        extra = QRectF(cx - R, cy - R - 64, 2 * R, 2 * R + 64)
+        return base.united(extra).toRect()
 
     def _applying_transform(self):
-        """是否处于会改变角色轮廓的状态（动作播放中 / 拖动倾斜中）。"""
+        """是否处于会改变角色轮廓的状态（动作 / 拖动倾斜 / 缩放 / 戴了配饰）。
+
+        配饰与整体缩放都会让角色超出正立轮廓，必须用大矩形遮罩兜住，
+        否则帽子、围巾的边角会被窗口形状裁掉（之前拖动残缺是同一个原因）。
+        """
         return bool(getattr(self, "_act_active", False)
                     or getattr(self, "_dragging", False)
-                    or abs(getattr(self, "_drag_lean", 0.0)) > 0.5)
+                    or abs(getattr(self, "_drag_lean", 0.0)) > 0.5
+                    or abs(getattr(self, "studio_scale", 1.0) - 1.0) > 0.001
+                    or bool(getattr(self, "studio_acc", [])))
 
     def _apply_mask(self):
         region = QRegion(self.sprite_region)
@@ -484,7 +551,11 @@ class PetWindow(QWidget):
     def play(self, name):
         if name not in ACTIONS or self.sleeping:
             return
+        act_cfg = self.studio["actions"]
+        if act_cfg["enabled"].get(name, True) is False:   # 工作台里关掉的动作不播
+            return
         dur, fn = ACTIONS[name]
+        dur /= max(0.1, float(act_cfg["speed"]))           # 速度倍率：>1 变快
         self._act = (name, time.monotonic(), dur, fn)
         self._act_active = True
         self._apply_mask()
@@ -544,11 +615,20 @@ class PetWindow(QWidget):
 
     def _idle_pick(self):
         if not (self._act or self.sleeping or self.panel.isVisible() or self._dragging):
-            name = random.choice(IDLE_ACTIONS)
-            if name == "look":
-                self._look_flip = random.random() < 0.5
-            self.play(name)
-        self.idle_timer.start(int(random.uniform(*IDLE_INTERVAL_RANGE) * 1000))
+            # 只有待机候选会随机抽到；权重来自工作台，默认 2/2/1/1/1 与原版一致
+            act_cfg = self.studio["actions"]
+            pool = []
+            for k in IDLE_POOL:
+                if act_cfg["enabled"].get(k, True) is False:
+                    continue
+                pool.extend([k] * int(act_cfg["weights"].get(k, 1)))
+            if pool:
+                name = random.choice(pool)
+                if name == "look":
+                    self._look_flip = random.random() < 0.5
+                self.play(name)
+        ac = self.studio["actions"]
+        self.idle_timer.start(int(random.uniform(ac["idle_min"], ac["idle_max"]) * 1000))
 
     def _tick(self):
         now = time.monotonic()
@@ -561,7 +641,8 @@ class PetWindow(QWidget):
         self._update_lean()
         self._update_action()
 
-        sleep_after = int(self.cfg.get("idle_sleep_seconds", 180) or 0)
+        # 自动睡觉时间由工作台发布（config.json 的 idle_sleep_seconds 作为初始值）
+        sleep_after = int(self.studio["settings"]["auto_sleep_seconds"])
         if (sleep_after and not self.sleeping and not self._act
                 and not self._dragging and not self.panel.isVisible()
                 and now - self.last_interact > sleep_after):
@@ -682,22 +763,51 @@ class PetWindow(QWidget):
         p.setOpacity(1.0)
         dx, dy, rot, sx, sy, flip = self._tf
         pm = self._current_frame()
+        scale = getattr(self, "studio_scale", 1.0)
+        accs = getattr(self, "studio_acc", [])
 
         # 以「角色中心」为锚点做变换：旋转/挤压都在窗口内部完成，不会被裁切
         cx = self._pet_offset.x() + self.pet_w / 2.0 + dx
         cy = self._pet_offset.y() + self.pet_h / 2.0 + dy + self._bob
+
+        def layer(items):
+            return [a for a in accs if a["follow"] and a["layer"] == items]
+
+        # 不跟随变形的配饰只跟着平移，单独一层画，避免被旋转带歪
+        loose_back = [a for a in accs if not a["follow"] and a["layer"] == "back"]
+        loose_front = [a for a in accs if not a["follow"] and a["layer"] == "front"]
+        if loose_back:
+            p.save(); p.translate(cx, cy)
+            self._draw_accessories(p, loose_back)
+            p.restore()
+
         p.save()
         p.translate(cx, cy)
         if rot:
             p.rotate(rot)
         if flip:
             p.scale(-1.0, 1.0)
-        p.scale(sx, sy)
+        p.scale(sx * scale, sy * scale)
+        # 配饰画在同一个变换里，跳起/倾斜/缩放时自然跟着角色走
+        self._draw_accessories(p, layer("back"))
         p.drawPixmap(int(-self.pet_w / 2), int(-self.pet_h / 2), pm)
+        self._draw_accessories(p, layer("front"))
         p.restore()
+
+        if loose_front:
+            p.save(); p.translate(cx, cy)
+            self._draw_accessories(p, loose_front)
+            p.restore()
 
         if self.sleeping:
             self._paint_zzz(p)
+
+    def _draw_accessories(self, p, items):
+        for a in items:
+            # 坐标以角色中心为原点，x/y 是相对角色宽高的归一化偏移
+            x = a["x"] * self.pet_w - a["lw"] / 2.0
+            y = a["y"] * self.pet_h - a["lh"] / 2.0
+            p.drawPixmap(int(x), int(y), a["pm"])
 
     def _paint_zzz(self, p):
         p.setFont(QFont("PingFang SC", 13, QFont.DemiBold))
@@ -851,7 +961,7 @@ class PetWindow(QWidget):
             top = max(self.posts, key=lambda x: x["heat"])
             self.say("现在最火的是：\n「%s」\n热度 %d" % (top["title"][:18], top["heat"]))
         else:
-            self.say(random.choice(PHRASES))
+            self.say(random.choice(self.studio["settings"]["phrases"]))
 
     def feed(self):
         self.fish += 1
@@ -898,6 +1008,9 @@ class PetWindow(QWidget):
         a.toggled.connect(self._toggle_pause)
         m.addAction(a)
         m.addSeparator()
+        m.addAction("打开形象工作台", self.open_studio)
+        m.addAction("重新同步形象", self.force_studio_sync)
+        m.addSeparator()
         m.addAction("退出小豚", self._quit)
         m.exec(gp)
 
@@ -917,6 +1030,62 @@ class PetWindow(QWidget):
                 self.refresh()
             self.panel.set_posts(self.posts)
             self.panel.show_near_pet()
+
+    # ---------- 形象工作台同步 ----------
+    def _studio_refresh(self, force=False):
+        """定时/手动拉取已发布形象。工作台没开或断网时静默回退到缓存。"""
+        if not self.studio_url:
+            return
+        w = getattr(self, "_studio_worker", None)
+        if w is not None and w.isRunning():
+            return
+        self._studio_force = bool(force)
+        w = StudioFetcher(self.studio_url)
+        w.ok.connect(self._on_studio)
+        w.fail.connect(self._on_studio_fail)
+        w.finished.connect(lambda w=w: self._studio_done(w))
+        self._studio_worker = w
+        w.start()
+
+    def _studio_done(self, w):
+        w.deleteLater()
+        if self._studio_worker is w:
+            self._studio_worker = None
+
+    def _on_studio_fail(self, _msg):
+        pass    # 静默：本地站本来就不一定一直开着
+
+    def _on_studio(self, data):
+        same = int(data.get("revision", 0)) == int(self.studio.get("revision", 0))
+        force = getattr(self, "_studio_force", False)
+        self._studio_force = False
+        if same and not force:
+            return
+        self.studio = data
+        ss.write_cache(data)
+        self._apply_studio()
+        if not same:
+            self.sleeping = False
+            self.play("hop")
+            self.say("换了身新装扮～\n%s · v%d" % (data["name"], data["revision"]), 4600)
+
+    def _apply_studio(self):
+        """把配置落成绘制状态（主线程里构建 QPixmap）。"""
+        self.studio_acc = ss.build_pixmaps(self.studio, self.pet_w)
+        self.studio_scale = float(self.studio["appearance"]["scale"])
+        self._apply_mask()
+        self.update()
+
+    def force_studio_sync(self):
+        self.say("正在同步形象…", 2200)
+        self._studio_refresh(True)
+
+    def open_studio(self):
+        if self.studio_url:
+            import webbrowser
+            webbrowser.open(self.studio_url)
+        else:
+            self.say("还没配置形象工作台地址～")
 
     # ---------- 数据 ----------
     def refresh(self):
@@ -963,7 +1132,8 @@ class PetWindow(QWidget):
             self.panel.set_posts(posts)
 
     def _notify(self, title, msg):
-        if not self.cfg.get("notify_system", True) or sys.platform != "darwin":
+        # 工作台「新帖系统通知」开关优先（启动时已用 config.json 初始化过）
+        if not self.studio["settings"]["notify"] or sys.platform != "darwin":
             return
         msg = msg.replace('"', "'")
         title = title.replace('"', "'")
@@ -1169,6 +1339,9 @@ def main():
     tm.addAction("回到右下角", lambda: (pet.show_pet(), pet._place_bottom_right()))
     tm.addAction("查看热帖榜", pet.toggle_panel)
     tm.addAction("立即刷新", pet.refresh)
+    tm.addSeparator()
+    tm.addAction("打开形象工作台", pet.open_studio)
+    tm.addAction("重新同步形象", pet.force_studio_sync)
     tm.addSeparator()
     tm.addAction("退出", pet._quit)
     tray.setContextMenu(tm)

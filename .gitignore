@@ -11,3 +11,8 @@ build/
 # 运行时状态（喂小鱼干计数等，每次启动自动生成）
 state.json
 state.json.tmp
+
+# 形象工作台下发的缓存与配饰图片（运行时自动拉取，随时可重新下载）
+studio_cache.json
+studio_cache.json.tmp
+assets/accessories/
