@@ -1,0 +1,91 @@
+{
+  "id": "placeholder",
+  "name": "关节验证 · 占位皮肤",
+  "version": "0.1.0",
+  "mode": "rig",
+  "canvas": 512,
+  "fps": 12,
+  "anchor": {
+    "x": 0.5,
+    "y": 0.5
+  },
+  "frames": {
+    "idle": "head.png",
+    "blink": "head_blink.png",
+    "happy": "head_happy.png",
+    "sleep": "head_sleep.png",
+    "speak": "head_speak.png"
+  },
+  "parts": [
+    {
+      "name": "body",
+      "file": "parts/body.png",
+      "pivot": {
+        "x": 0.0,
+        "y": 0.0
+      },
+      "parent": null,
+      "z": 0,
+      "overlap": 0
+    },
+    {
+      "name": "tail",
+      "file": "parts/tail.png",
+      "pivot": {
+        "x": -0.18,
+        "y": -0.4
+      },
+      "parent": "head",
+      "z": 5,
+      "overlap": 10
+    },
+    {
+      "name": "head",
+      "file": "parts/head.png",
+      "pivot": {
+        "x": 0.0,
+        "y": -0.04
+      },
+      "parent": "body",
+      "z": 10,
+      "overlap": 12
+    },
+    {
+      "name": "hand_l",
+      "file": "parts/hand_l.png",
+      "pivot": {
+        "x": -0.3,
+        "y": 0.05
+      },
+      "parent": "body",
+      "z": 20,
+      "overlap": 12
+    },
+    {
+      "name": "hand_r",
+      "file": "parts/hand_r.png",
+      "pivot": {
+        "x": 0.28,
+        "y": 0.02
+      },
+      "parent": "body",
+      "z": 20,
+      "overlap": 12
+    },
+    {
+      "name": "mouth",
+      "file": "parts/mouth.png",
+      "pivot": {
+        "x": 0.0,
+        "y": -0.12
+      },
+      "parent": "head",
+      "z": 30,
+      "overlap": 8
+    }
+  ],
+  "placeholder": true,
+  "tintable": false,
+  "author": "自动生成",
+  "notes": "从 pet.png 程序化切分，挖空区填同色底；仅用于验证链路，正式素材见 JOINT_SPEC.md"
+}
