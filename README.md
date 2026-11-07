@@ -10,8 +10,9 @@
 - **动作注册表**：`hop / sway / look / stretch / nod / shake / land / dance / wobble` 共 9 个动作，用 `@action("名字", 秒数)` 装饰器注册，函数返回 `(dx, dy, 旋转, 横缩放, 纵缩放, 水平翻转)` 即可扩展。
 - **待机随机动作**：每隔 4.5~11 秒随机播一个动作，另有随机眨眼、呼吸浮动。
 - **拖动倾斜**：按最近 100ms 的平均速度计算倾斜角，慢拖也有明显反应，甩到 1200px/s 吃满 30°；松手有边缘吸附和回弹余震。
-- **热帖播报**：内置演示数据；填入 `api_url` 后可切到真实论坛接口。首次刷新只建立基线、不误报新帖。
+- **热帖播报**：内置演示数据；填入 `api_url` 后可切到真实论坛接口。首次刷新只建立基线、不误报新帖；打开 `auto_poll` 后按分钟定时拉取。
 - **状态**：连点 5 次跳舞、右键喂小鱼干、180 秒无操作自动睡觉（zzz），点击唤醒。
+- **按需调帧**：动作/拖动 16.7fps、静止 6.7fps、睡觉 3.3fps；呼吸、倾斜、动作都按真实时间计算，降帧不会让动画变慢，长时间常驻更省电。
 
 ## 环境要求
 
@@ -64,8 +65,12 @@ python3 make_app.py
 | `notify_system` | `true` | 有新帖时是否发 macOS 系统通知 |
 | `pet_width` | `60` | 角色逻辑宽度（px）；素材 240px 通过 DPR=4 显示 |
 | `idle_sleep_seconds` | `180` | 无操作多久自动睡着，`0` 表示永不 |
-| `fish` | `0` | 已投喂的小鱼干数量，喂一次会写回本文件 |
-| `auto_poll` / `poll_interval_minutes` | `false` / `3` | **预留字段，当前版本未实现轮询**，写出来只为接接口时不用改结构 |
+| `auto_poll` | `false` | 是否定时拉新帖。**仅在 `api_url` 非空时生效**；演示数据模式下不会启动，避免假数据反复弹提醒 |
+| `poll_interval_minutes` | `3` | 轮询间隔（分钟，最小 1）。已有请求未结束时会自动跳过这一轮 |
+
+`config.json` 只在文件不存在时自动生成，之后启动只读不写，手改不会被覆盖。
+
+运行时状态单独放在 `state.json`（首次启动自动生成，已加入 `.gitignore`）：目前只存 `fish`（已投喂的小鱼干数量）。旧版本把 `fish` 写在 `config.json` 里，程序会在首次启动时自动迁移，计数不会丢；因此喂鱼不会再让 git 显示仓库有改动。
 
 ### 接口约定
 
@@ -107,7 +112,8 @@ python3 make_app.py
 tunshuo-pet/
 ├── tunshuo_pet_pro.py     主程序（绘制 / 动作 / 交互 / 数据源 / 托盘）
 ├── make_app.py            macOS .app 打包脚本
-├── config.json            配置与小鱼干计数
+├── config.json            用户配置（入库）
+├── state.json             运行时状态（自动生成，不入库）
 ├── requirements.txt       依赖声明
 ├── LICENSE                MIT
 └── assets/
@@ -129,8 +135,7 @@ python3 assets/process_sprite.py
 ## 已知限制
 
 - 仅 macOS；Windows / Linux 上托盘通知、打包脚本与部分窗口属性不适用。
-- 默认使用演示数据，尚未接真实论坛接口。
-- `config.json` 同时存运行时状态，喂鱼后 git 会显示该文件有改动。
+- 默认使用演示数据，尚未接真实论坛接口；自动轮询默认关闭，接好接口后需在 `config.json` 里把 `auto_poll` 设为 `true`。
 - 无边框透明窗口必须关掉系统投影（`Qt.NoDropShadowWindowHint`），否则动作播放、遮罩变矩形时，macOS 会在角色背后投出一块灰黑方块。
 - 若启动后没有反应，先看 `~/Library/Logs/tunshuo-pet.log`；启动器会在 PySide6 缺失时写明原因。
 
