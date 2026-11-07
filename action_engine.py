@@ -6,13 +6,17 @@
 解释器只做插值，不再有任何硬编码公式；工作台编辑完发布后，桌宠直接用
 下发的关键帧覆盖本地默认值，断网时回落到 actions.json。
 
-关键帧格式（7 个数）：
-    [t, dx, dy, rot, sx, sy, flip]
+关键帧格式（前 7 个数固定，第 8 位可选）：
+    [t, dx, dy, rot, sx, sy, flip]                  root 整体变换（旧格式）
+    [t, dx, dy, rot, sx, sy, flip, {"hand_r": [...]}]  追加部件字典（新格式）
     t    0..1      动作进度
     dx/dy          位移（桌宠逻辑像素）
     rot            旋转角度（度）
     sx/sy          横纵缩放
     flip           0/1 水平翻转；def.flip_random=true 时由播放方随机决定
+    第 8 位       部件名 → [dx, dy, rot, sx, sy]，作用在父层局部坐标系；
+                  未写出的部件该帧视为静止，动作结束自动回正。
+                  老数据没有第 8 位时行为完全不变（向后兼容）。
 """
 
 import json
@@ -29,6 +33,16 @@ LIMITS = {
 }
 MAX_ACTIONS = 24
 MAX_KEYS = 64
+MAX_PARTS = 12
+PART_LIMITS = {
+    "dx": (-120.0, 120.0),
+    "dy": (-120.0, 120.0),
+    "rot": (-120.0, 120.0),
+    "sx": (0.3, 2.0),
+    "sy": (0.3, 2.0),
+}
+PART_ZERO = (0.0, 0.0, 0.0, 1.0, 1.0)
+PART_CHANNELS = ("dx", "dy", "rot", "sx", "sy")
 
 
 def _num(v, lo, hi, default):
@@ -39,6 +53,24 @@ def _num(v, lo, hi, default):
     if not math.isfinite(n):
         return default
     return max(lo, min(hi, n))
+
+
+def _clean_parts(raw):
+    """净化关键帧第 8 位：部件名 → 5 通道，非法项直接丢弃。"""
+    if not isinstance(raw, dict):
+        return {}
+    out = {}
+    for name, vals in list(raw.items())[:MAX_PARTS]:
+        if not isinstance(name, str) or not KEY_RE.fullmatch(name):
+            continue
+        if not isinstance(vals, (list, tuple)) or len(vals) < 5:
+            continue
+        clean = []
+        for i, k in enumerate(PART_CHANNELS):
+            default = 1.0 if k in ("sx", "sy") else 0.0
+            clean.append(round(_num(vals[i], *PART_LIMITS[k], default), 3))
+        out[name] = clean
+    return out
 
 
 def normalize_defs(raw):
@@ -70,11 +102,21 @@ def normalize_defs(raw):
             vals = [_num(row[i], *LIMITS[k], 0.0 if k in ("dx", "dy", "rot") else 1.0)
                     for i, k in zip(range(1, 6), ("dx", "dy", "rot", "sx", "sy"))]
             flip = 1 if len(row) > 6 and bool(row[6]) else 0
-            clean.append([round(t, 4)] + [round(v, 3) for v in vals] + [flip])
+            frame = [round(t, 4)] + [round(v, 3) for v in vals] + [flip]
+            parts = _clean_parts(row[7]) if len(row) > 7 else {}
+            if parts:
+                frame.append(parts)
+            clean.append(frame)
         if len(clean) < 2 or clean[0][0] > 0.0001:
-            clean.insert(0, [0.0] + list(clean[0][1:7]))
+            head = [0.0] + list(clean[0][1:7])
+            if len(clean[0]) > 7:
+                head.append(dict(clean[0][7]))
+            clean.insert(0, head)
         if clean[-1][0] < 0.9999:
-            clean.append([1.0] + list(clean[-1][1:7]))
+            tail = [1.0] + list(clean[-1][1:7])
+            if len(clean[-1]) > 7:
+                tail.append(dict(clean[-1][7]))
+            clean.append(tail)
         out.append({
             "key": key,
             "name": str(a.get("name") or key)[:40],
@@ -100,31 +142,55 @@ def to_map(defs):
     return {a["key"]: a for a in defs}
 
 
+def _segment(keys, t):
+    """定位 t 落在哪两帧之间，返回 (帧a, 帧b, cosine 权重)；边界时 a==b、w=0。"""
+    t = max(0.0, min(1.0, float(t)))
+    if t <= keys[0][0]:
+        return keys[0], keys[0], 0.0
+    if t >= keys[-1][0]:
+        return keys[-1], keys[-1], 0.0
+    lo, hi = 0, len(keys) - 1
+    while hi - lo > 1:
+        mid = (lo + hi) // 2
+        if keys[mid][0] <= t:
+            lo = mid
+        else:
+            hi = mid
+    a, b = keys[lo], keys[hi]
+    span = b[0] - a[0]
+    u = 0.0 if span <= 0 else (t - a[0]) / span
+    return a, b, (1 - math.cos(math.pi * u)) / 2
+
+
 def evaluate(action, t, flip=False):
-    """按 cosine 缓动插值，返回 (dx, dy, rot, sx, sy, flip)。"""
+    """root 整体变换，按 cosine 缓动插值，返回 (dx, dy, rot, sx, sy, flip)。"""
     keys = action.get("keys") or []
     if len(keys) < 2:                 # 脏数据兜底：不做任何变换，不让桌宠崩
         return (0.0, 0.0, 0.0, 1.0, 1.0, False)
-    t = max(0.0, min(1.0, float(t)))
-    if t <= keys[0][0]:
-        row = keys[0]
-    elif t >= keys[-1][0]:
-        row = keys[-1]
-    else:
-        lo, hi = 0, len(keys) - 1
-        while hi - lo > 1:
-            mid = (lo + hi) // 2
-            if keys[mid][0] <= t:
-                lo = mid
-            else:
-                hi = mid
-        a, b = keys[lo], keys[hi]
-        span = b[0] - a[0]
-        u = 0.0 if span <= 0 else (t - a[0]) / span
-        w = (1 - math.cos(math.pi * u)) / 2
-        row = [t] + [a[i] + (b[i] - a[i]) * w for i in range(1, 6)] + [a[6]]
-    use_flip = bool(flip) if action.get("flip_random") else bool(row[6])
-    return (row[1], row[2], row[3], row[4], row[5], use_flip)
+    a, b, w = _segment(keys, t)
+    vals = [a[i] + (b[i] - a[i]) * w for i in range(1, 6)]
+    use_flip = bool(flip) if action.get("flip_random") else bool(a[6])
+    return (vals[0], vals[1], vals[2], vals[3], vals[4], use_flip)
+
+
+def evaluate_parts(action, t):
+    """部件局部变换：{name: (dx, dy, rot, sx, sy)}。
+
+    某帧没写某个部件时按 PART_ZERO 参与插值，因此动作播完部件自动回正；
+    整条动作没有第 8 位时返回空 dict，绘制端等价于老版整图模式。
+    """
+    keys = action.get("keys") or []
+    if len(keys) < 2:
+        return {}
+    a, b, w = _segment(keys, t)
+    pa = a[7] if len(a) > 7 and isinstance(a[7], dict) else {}
+    pb = b[7] if len(b) > 7 and isinstance(b[7], dict) else {}
+    out = {}
+    for name in set(pa) | set(pb):
+        va = pa.get(name, PART_ZERO)
+        vb = pb.get(name, PART_ZERO)
+        out[name] = tuple(va[i] + (vb[i] - va[i]) * w for i in range(5))
+    return out
 
 
 def idle_pool(defs, enabled):

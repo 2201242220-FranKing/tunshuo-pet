@@ -13,12 +13,15 @@ import json
 import os
 import re
 import urllib.request
+from urllib.parse import quote
 
 import action_engine as ae
+import skin_rig as rig
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 CACHE_PATH = os.path.join(APP_DIR, "studio_cache.json")
 ACC_DIR = os.path.join(APP_DIR, "assets", "accessories")
+SKIN_DIR = os.path.join(APP_DIR, "assets", "skins")
 
 DEFAULT_PHRASES = [
     "在的！有热帖我第一个告诉你～",
@@ -47,6 +50,7 @@ DEFAULT_STUDIO = {
         "phrases": list(DEFAULT_PHRASES),
     },
     "accessories": [],
+    "skin": {"id": "default", "mode": "flat"},
 }
 
 
@@ -56,6 +60,12 @@ def _num(v, lo, hi, default):
     except (TypeError, ValueError):
         return default
     return max(lo, min(hi, n))
+
+
+def _attach(v):
+    """配饰挂点：部件名或 root；旧数据没有该字段时默认 root（老配饰不跑位）。"""
+    s = str(v or "root")[:32].strip().lower()
+    return s if s == "root" or rig.NAME_RE.fullmatch(s) else "root"
 
 
 def normalize(raw):
@@ -98,6 +108,8 @@ def normalize(raw):
         if cleaned:
             d["settings"]["phrases"] = cleaned
 
+    d["skin"] = rig.normalize_ref(raw.get("skin"))
+
     accs = raw.get("accessories")
     if isinstance(accs, list):
         for a in accs[:12]:
@@ -116,6 +128,7 @@ def normalize(raw):
                 "scale": _num(a.get("scale"), 0.1, 1.6, 0.5),
                 "layer": "back" if a.get("layer") == "back" else "front",
                 "follow": bool(a.get("follow", True)),
+                "attach": _attach(a.get("attach")),
             })
     return d
 
@@ -144,6 +157,77 @@ def _opener():
     return urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
+def skin_files(m):
+    """manifest 声明的所有素材文件（含预览图）。"""
+    if not m:
+        return []
+    files = set(m.get("frames", {}).values()) | {p["file"] for p in m.get("parts", [])}
+    files.add("preview.png")
+    return sorted(f for f in files if f and ".." not in f.split("/"))
+
+
+def load_skin(ref):
+    """主线程/离线用：从本地读已下载的关节皮肤 manifest。"""
+    ref = rig.normalize_ref(ref)
+    if ref["mode"] != "rig" or ref["id"] == "default":
+        return None
+    path = os.path.join(SKIN_DIR, ref["id"], "manifest.json")
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            m = rig.normalize_manifest(json.load(f))
+        return m if m and m["mode"] == "rig" else None
+    except Exception:
+        return None
+
+
+def _skin_local(root, rel):
+    """白名单 + 前缀校验，杜绝服务端下发路径穿越。"""
+    if not rel or ".." in rel.split("/"):
+        return None
+    p = os.path.abspath(os.path.join(root, rel))
+    return p if p.startswith(os.path.abspath(root) + os.sep) else None
+
+
+def _fetch_skin(base_url, ref):
+    """线程内执行：下载关节皮肤 manifest 与全部素材，失败静默（用上一次缓存）。"""
+    ref = rig.normalize_ref(ref)
+    if ref["mode"] != "rig" or ref["id"] == "default":
+        return
+    root = os.path.join(SKIN_DIR, ref["id"])
+    try:
+        os.makedirs(root, exist_ok=True)
+        req = urllib.request.Request(
+            base_url.rstrip("/") + "/api/skin-manifest?id=" + quote(ref["id"]),
+            headers={"User-Agent": "TunshuoPet/4.0"})
+        with _opener().open(req, timeout=5) as r:
+            m = rig.normalize_manifest(json.loads(r.read().decode("utf-8")))
+        if not m or m["mode"] != "rig":
+            return
+        with open(os.path.join(root, "manifest.json"), "w", encoding="utf-8") as f:
+            json.dump(m, f, ensure_ascii=False, indent=2)
+        for rel in skin_files(m):
+            local = _skin_local(root, rel)
+            if not local or (os.path.isfile(local) and os.path.getsize(local) > 64):
+                continue
+            os.makedirs(os.path.dirname(local), exist_ok=True)
+            url = (base_url.rstrip("/") + "/api/skin-file?id=" + quote(ref["id"])
+                   + "&file=" + quote(rel))
+            req = urllib.request.Request(url, headers={"User-Agent": "TunshuoPet/4.0"})
+            try:
+                with _opener().open(req, timeout=8) as r:
+                    blob = r.read()
+                if len(blob) < 64 or len(blob) > 6 * 1024 * 1024:
+                    continue
+                tmp = local + ".tmp"
+                with open(tmp, "wb") as f:
+                    f.write(blob)
+                os.replace(tmp, local)
+            except Exception:
+                continue        # 单张失败不阻塞其它素材，也不影响配置生效
+    except Exception:
+        return
+
+
 def fetch(base_url):
     """线程内执行。返回规范化的配置 dict；失败抛异常由调用方静默处理。"""
     url = base_url.rstrip("/") + "/api/published"
@@ -169,6 +253,7 @@ def fetch(base_url):
             os.replace(tmp, local)
         except Exception:
             continue          # 单张配饰失败不影响其它配饰与配置生效
+    _fetch_skin(base_url, data["skin"])
     return data
 
 

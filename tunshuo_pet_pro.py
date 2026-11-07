@@ -28,12 +28,13 @@ import urllib.request
 
 import studio_sync as ss
 import action_engine as ae
+import skin_rig as rig
 
 from PySide6.QtCore import (QAbstractAnimation, QEasingCurve, QPoint, QRectF,
                             QSize, Qt, QThread, QTimer, QVariantAnimation,
                             Signal)
 from PySide6.QtGui import (QAction, QColor, QFont, QFontMetrics, QIcon, QPainter,
-                           QPainterPath, QPen, QPixmap, QRegion)
+                           QPainterPath, QPen, QPixmap, QRegion, QTransform)
 from PySide6.QtWidgets import (QApplication, QHBoxLayout, QLabel, QListWidget,
                                QListWidgetItem, QMenu, QPushButton,
                                QSystemTrayIcon, QVBoxLayout, QWidget)
@@ -237,6 +238,10 @@ class PetWindow(QWidget):
         self.studio = ss.load_cache()
         # 动作定义：优先用工作台已发布的版本，离线时回落到 actions.json
         cached_defs = ae.normalize_defs(self.studio.get("actions", {}).get("defs"))
+        if cached_defs:
+            # 兼容旧缓存：保留用户发布过的动作，补齐出厂新增的关节动作
+            have = {d["key"] for d in cached_defs}
+            cached_defs = cached_defs + [d for d in DEFAULT_ACTION_DEFS if d["key"] not in have]
         self.action_defs = cached_defs or list(DEFAULT_ACTION_DEFS)
         self.action_map = ae.to_map(self.action_defs)
         if int(self.studio.get("revision", 0)) > 0 and not cached_defs:
@@ -251,6 +256,15 @@ class PetWindow(QWidget):
             except (TypeError, ValueError):
                 pass
         self.studio_acc = []
+        # 关节皮肤（rig 模式）：None 时完全走原来的整图绘制路径，零回归
+        self.rig = None
+        self.rig_pixmaps = {}
+        self.rig_frames = {}
+        self.rig_root = ""
+        self._part_tf = {}          # 当前帧各部件的局部变换
+        self._part_anim = None      # 独立于 root 的部件动画（拖动挣扎 / 摸头）
+        self._last_drag_parts = 0.0
+        self._press_local = None
         self.studio_url = str(cfg.get("studio_url") or "").strip()
         self._studio_worker = None
 
@@ -416,6 +430,11 @@ class PetWindow(QWidget):
             hx = abs(a["x"] * self.pet_w) + a["lw"] / 2.0
             hy = abs(a["y"] * self.pet_h) + a["lh"] / 2.0
             R = max(R, math.hypot(hx, hy) * scale)
+        if getattr(self, "rig", None):
+            # 部件转动/挥手会伸到角色轮廓外；按父子变换后的保守包围半径扩遮罩，
+            # 否则手尖会被窗口形状裁掉（与之前拖动残缺是同一个坑）
+            R = max(R, rig.bounding_radius(self.rig["parts"], self._part_tf,
+                                           self.pet_w, self.pet_h) * scale)
         cx = self._pet_offset.x() + self.pet_w / 2.0
         cy = self._pet_offset.y() + self.pet_h / 2.0
         # hop 动作会让整体上移约 58px，向上多留 64px
@@ -430,9 +449,11 @@ class PetWindow(QWidget):
         """
         return bool(getattr(self, "_act_active", False)
                     or getattr(self, "_dragging", False)
+                    or getattr(self, "_part_anim", None)
                     or abs(getattr(self, "_drag_lean", 0.0)) > 0.5
                     or abs(getattr(self, "studio_scale", 1.0) - 1.0) > 0.001
-                    or bool(getattr(self, "studio_acc", [])))
+                    or bool(getattr(self, "studio_acc", []))
+                    or bool(getattr(self, "rig", None)))
 
     def _apply_mask(self):
         region = QRegion(self.sprite_region)
@@ -504,6 +525,28 @@ class PetWindow(QWidget):
         self.touch()
         self.timer.setInterval(60)    # 立刻提帧，别等下一拍才动起来
 
+    def on_event(self, name, parts_only=False):
+        """事件状态机：按 trigger 找动作播放；找不到返回 False 让调用方走旧逻辑。
+
+        parts_only=True 时只驱动部件层，不动 root —— 拖动中播挣扎动画仍要保留倾斜。
+        """
+        if self.sleeping or not self.rig:
+            return False
+        cfg = self.studio["actions"]
+        enabled = cfg.get("enabled", {})
+        speed = max(0.1, float(cfg["speed"]))
+        for d in self.action_defs:
+            if d.get("trigger") != name or enabled.get(d["key"], True) is False:
+                continue
+            if parts_only:
+                self._part_anim = (d, time.monotonic(), float(d["duration"]) / speed)
+                self.timer.setInterval(60)
+                self._apply_mask()
+            else:
+                self.play(d["key"])
+            return True
+        return False
+
     def _lean_target(self, vx):
         """把拖动速度(px/s)映射成倾斜角度(度)。
 
@@ -542,18 +585,30 @@ class PetWindow(QWidget):
             self._drag_lean = 0.0
 
     def _update_action(self):
+        parts = {}
         if not self._act:
             self._tf = (0.0, 0.0, self._drag_lean, 1.0, 1.0, False)
-            return
-        name, t0, dur, action_def = self._act
-        t = (time.monotonic() - t0) / dur
-        if t >= 1.0:
-            self._act = None
-            self._act_active = False
-            self._tf = (0.0, 0.0, 0.0, 1.0, 1.0, False)
-            self._apply_mask()
-            return
-        self._tf = ae.evaluate(action_def, max(0.0, t), self._act_flip)
+        else:
+            name, t0, dur, action_def = self._act
+            t = (time.monotonic() - t0) / dur
+            if t >= 1.0:
+                self._act = None
+                self._act_active = False
+                self._tf = (0.0, 0.0, 0.0, 1.0, 1.0, False)
+                self._apply_mask()
+            else:
+                self._tf = ae.evaluate(action_def, max(0.0, t), self._act_flip)
+                parts.update(ae.evaluate_parts(action_def, max(0.0, t)))
+        # 部件动画独立于 root：拖动时也能挣扎，不会把倾斜角覆盖掉
+        if self._part_anim:
+            d, t0, dur = self._part_anim
+            t = (time.monotonic() - t0) / dur
+            if t >= 1.0:
+                self._part_anim = None
+                self._apply_mask()
+            else:
+                parts.update(ae.evaluate_parts(d, max(0.0, t)))
+        self._part_tf = parts
 
     def _idle_pick(self):
         if not (self._act or self.sleeping or self.panel.isVisible() or self._dragging):
@@ -597,8 +652,8 @@ class PetWindow(QWidget):
         """
         anim = getattr(self, "bubble_alpha_anim", None)
         fading = anim is not None and anim.state() != QAbstractAnimation.Stopped
-        busy = (self._act or self._dragging or abs(self._drag_lean) > 0.15
-                or self.blinking or fading)
+        busy = (self._act or self._part_anim or self._dragging
+                or abs(self._drag_lean) > 0.15 or self.blinking or fading)
         if busy:
             interval = 60
         elif self.sleeping and not self.bubble_text:
@@ -710,7 +765,10 @@ class PetWindow(QWidget):
         cy = self._pet_offset.y() + self.pet_h / 2.0 + dy + self._bob
 
         def layer(items):
-            return [a for a in accs if a["follow"] and a["layer"] == items]
+            # 挂到部件上的配饰由 _paint_rig_layers 在该部件局部坐标系里画；
+            # 这里只处理挂在 root 的（旧数据 attach 缺省 root，行为完全不变）
+            return [a for a in accs if a["follow"] and a["layer"] == items
+                    and a.get("attach", "root") == "root"]
 
         # 不跟随变形的配饰只跟着平移，单独一层画，避免被旋转带歪
         loose_back = [a for a in accs if not a["follow"] and a["layer"] == "back"]
@@ -729,7 +787,10 @@ class PetWindow(QWidget):
         p.scale(sx * scale, sy * scale)
         # 配饰画在同一个变换里，跳起/倾斜/缩放时自然跟着角色走
         self._draw_accessories(p, layer("back"))
-        p.drawPixmap(int(-self.pet_w / 2), int(-self.pet_h / 2), pm)
+        if self.rig:
+            self._paint_rig_layers(p, accs)
+        else:
+            p.drawPixmap(int(-self.pet_w / 2), int(-self.pet_h / 2), pm)
         self._draw_accessories(p, layer("front"))
         p.restore()
 
@@ -740,6 +801,72 @@ class PetWindow(QWidget):
 
         if self.sleeping:
             self._paint_zzz(p)
+
+    def _current_head_frame(self):
+        """rig 模式的表情帧只换 head 层，body / 手 / 呆毛不动，避免眨眼时手跟着跳。"""
+        key = "idle"
+        if self.sleeping:
+            key = "sleep"
+        elif self._act and self._act[0] in ("dance", "hop"):
+            key = "happy"
+        elif self.blinking:
+            key = "blink"
+        elif self.bubble_text:
+            key = "speak"          # 播报时张嘴
+        return self.rig_frames.get(key) or self.rig_frames.get("idle")
+
+    def _draw_attached(self, p, accs, name, layer):
+        items = [a for a in accs if a.get("attach", "root") == name
+                 and a.get("layer") == layer and a.get("follow", True)]
+        if items:
+            self._draw_accessories(p, items)
+
+    def _paint_rig_layers(self, p, accs):
+        """按 z 序逐层绘制；每层的世界变换沿 parent 链累乘，部件动画作用在自己枢轴上。
+
+        变换继承与绘制顺序是两件事：先算好世界矩阵，再按 z 序画，这样
+        tail 挂在 head 下、但 z 比 head 小也能正确画在头后面。
+        """
+        parts = rig.z_order(self.rig["parts"])
+        by_name = {x["name"]: x for x in parts}
+        cache = {}
+
+        def world(name):
+            if name in cache:
+                return cache[name]
+            part = by_name[name]
+            dx, dy, rot2, sx2, sy2 = self._part_tf.get(name, rig.PART_ZERO)
+            px = part["pivot"]["x"] * self.pet_w
+            py = part["pivot"]["y"] * self.pet_h
+            t = QTransform()
+            t.translate(px + dx, py + dy)
+            if rot2:
+                t.rotate(rot2)
+            if sx2 != 1.0 or sy2 != 1.0:
+                t.scale(sx2, sy2)
+            t.translate(-px, -py)
+            parent = part["parent"]
+            # QTransform 是行向量约定，t * world(parent) 才等价于列向量下的
+            # world(parent) ∘ local：子部件先绕自己的枢轴转，再跟父层一起动。
+            # 顺序写反会让「头转 + 手挥」时手臂在世界坐标里旋转，网页预览也会对不上。
+            w = (t * world(parent)) if parent else t
+            cache[name] = w
+            return w
+
+        w, h = self.pet_w, self.pet_h
+        for part in parts:
+            name = part["name"]
+            pm = self.rig_pixmaps.get(name)
+            if name == "head":
+                pm = self._current_head_frame() or pm
+            if not pm or pm.isNull():
+                continue
+            p.save()
+            p.setTransform(world(name), True)
+            self._draw_attached(p, accs, name, "back")
+            p.drawPixmap(QRectF(-w / 2.0, -h / 2.0, w, h), pm, QRectF(pm.rect()))
+            self._draw_attached(p, accs, name, "front")
+            p.restore()
 
     def _draw_accessories(self, p, items):
         for a in items:
@@ -804,12 +931,14 @@ class PetWindow(QWidget):
             return
         if e.button() == Qt.LeftButton:
             self._press_at = e.globalPosition().toPoint()
+            self._press_local = e.position().toPoint()
             self._drag_pos = self._press_at - self.frameGeometry().topLeft()
             self._drag_moved = 0
             self._dragging = False
             self._lean_v = 0.0
             self._last_gp = self._press_at
             self._last_move_t = time.monotonic()
+            self._last_drag_parts = 0.0
             self._move_hist = [(self._last_move_t, self._press_at.x())]
         elif e.button() == Qt.RightButton:
             self._menu(e.globalPosition().toPoint())
@@ -846,6 +975,10 @@ class PetWindow(QWidget):
             self._last_gp = gp
             self._last_move_t = now
             self._update_lean()
+            # 拖动中周期性挣扎：只驱动部件层，root 的倾斜角仍由 _update_lean 控制
+            if self._dragging and self.rig and now - self._last_drag_parts > 0.85:
+                self._last_drag_parts = now
+                self.on_event("dragmove", parts_only=True)
 
     def mouseReleaseEvent(self, e):
         if e.button() == Qt.LeftButton:
@@ -895,7 +1028,15 @@ class PetWindow(QWidget):
             self.say("哇，你点我这么多下！\n那我跳个舞吧～", 5200)
             return
 
-        self.play("shake")
+        # 点上半身（头）= 摸头歪头；点身体 / 整图模式仍走原来的抖动
+        pat = False
+        if self.rig and self._press_local is not None:
+            lx = self._press_local.x() - self._pet_offset.x()
+            ly = self._press_local.y() - self._pet_offset.y()
+            if 0 <= lx <= self.pet_w and 0 <= ly <= self.pet_h * 0.45:
+                pat = self.on_event("pat")
+        if not pat:
+            self.play("shake")
         if self.posts and random.random() < 0.55:
             top = max(self.posts, key=lambda x: x["heat"])
             self.say("现在最火的是：\n「%s」\n热度 %d" % (top["title"][:18], top["heat"]))
@@ -938,6 +1079,7 @@ class PetWindow(QWidget):
             "QMenu::separator{height:1px;background:#E6EFF9;margin:4px 8px;}")
         m.addAction("喂一条小鱼干（%d）" % self.fish, self.feed)
         m.addAction("动一下", self.do_random_action)
+        m.addAction("打个招呼", lambda: self.on_event("greet") or self.play("wave"))
         m.addAction("睡 / 醒", lambda: self.wake() if self.sleeping else self.sleep())
         m.addSeparator()
         m.addAction("查看热帖榜", self.toggle_panel)
@@ -1008,14 +1150,56 @@ class PetWindow(QWidget):
             self.play("hop")
             self.say("换了身新装扮～\n%s · v%d" % (data["name"], data["revision"]), 4600)
 
+    def _load_rig(self):
+        """在工作台切到关节皮肤时加载全部部件层；素材不齐/损坏就退回整图模式。"""
+        def flat():
+            self.rig = None
+            self.rig_pixmaps = {}
+            self.rig_frames = {}
+            self.rig_root = ""
+            self._part_tf = {}
+
+        m = ss.load_skin(self.studio.get("skin"))
+        if not m:
+            flat()
+            return
+        root = os.path.join(ss.SKIN_DIR, m["id"])
+        if any(not os.path.isfile(os.path.join(root, f)) for f in ss.skin_files(m)):
+            flat()               # 断网 / 下载中断时绝不画半个角色
+            return
+        pms = {}
+        for part in m["parts"]:
+            pm = QPixmap(os.path.join(root, part["file"]))
+            if pm.isNull():
+                flat()
+                return
+            pms[part["name"]] = pm
+        frames = {}
+        for key, fname in m["frames"].items():
+            pm = QPixmap(os.path.join(root, fname))
+            if not pm.isNull():
+                frames[key] = pm
+        if not frames.get("idle"):
+            flat()
+            return
+        self.rig = m
+        self.rig_pixmaps = pms
+        self.rig_frames = frames
+        self.rig_root = root
+        self._apply_mask()
+
     def _apply_studio(self):
         """把配置落成绘制状态（主线程里构建 QPixmap）。"""
         # 工作台发布的动作定义覆盖本地默认值；下发为空/脏数据时保持默认，不让小豚瘫掉
         synced = ae.normalize_defs(self.studio.get("actions", {}).get("defs"))
+        if synced:
+            have = {d["key"] for d in synced}
+            synced = synced + [d for d in DEFAULT_ACTION_DEFS if d["key"] not in have]
         self.action_defs = synced or list(DEFAULT_ACTION_DEFS)
         self.action_map = ae.to_map(self.action_defs)
         self.studio_acc = ss.build_pixmaps(self.studio, self.pet_w)
         self.studio_scale = float(self.studio["appearance"]["scale"])
+        self._load_rig()
         self._apply_mask()
         self.update()
 
@@ -1067,7 +1251,9 @@ class PetWindow(QWidget):
         if new and not self.paused:
             top = max(new, key=lambda x: x["heat"])
             self.sleeping = False
-            self.play("hop")
+            # 关节皮肤下改成「抬手播报」，整图模式仍走原来的蹦一下
+            if not self.on_event("newpost"):
+                self.play("hop")
             self.say("有新帖！\n「%s」\n%s · 热度 %d"
                      % (top["title"][:18], top["author"], top["heat"]), 6800)
             self._notify("豚说小豚", "新帖：%s（热度 %d）" % (top["title"][:22], top["heat"]))
@@ -1279,6 +1465,7 @@ def main():
     tm.aboutToShow.connect(_sync_label)
     tm.addAction("喂小鱼干", pet.feed)
     tm.addAction("动一下", pet.do_random_action)
+    tm.addAction("打个招呼", lambda: pet.on_event("greet") or pet.play("wave"))
     tm.addAction("回到右下角", lambda: (pet.show_pet(), pet._place_bottom_right()))
     tm.addAction("查看热帖榜", pet.toggle_panel)
     tm.addAction("立即刷新", pet.refresh)

@@ -16,3 +16,6 @@ state.json.tmp
 studio_cache.json
 studio_cache.json.tmp
 assets/accessories/
+# 工作台下发的皮肤包（运行时自动拉取）；内置 placeholder 验证包随仓库保留
+assets/skins/*/
+!assets/skins/placeholder/
