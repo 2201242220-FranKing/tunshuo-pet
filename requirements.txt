@@ -1,0 +1,7 @@
+# 运行时依赖（macOS 12+ / Python 3.9~3.13）
+# 6.9.2 是在 macOS 12.6.1 Intel 上验证过的版本
+PySide6-Essentials==6.9.2
+
+# 仅重新生成 assets/pet.png、pet_blink.png 时需要
+# python3 assets/process_sprite.py
+Pillow>=10.0
