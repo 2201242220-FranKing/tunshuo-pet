@@ -26,8 +26,9 @@ import sys
 import time
 import urllib.request
 
-from PySide6.QtCore import (QEasingCurve, QPoint, QRectF, QSize, Qt, QThread,
-                            QTimer, QVariantAnimation, Signal)
+from PySide6.QtCore import (QAbstractAnimation, QEasingCurve, QPoint, QRectF,
+                            QSize, Qt, QThread, QTimer, QVariantAnimation,
+                            Signal)
 from PySide6.QtGui import (QAction, QColor, QFont, QFontMetrics, QIcon, QPainter,
                            QPainterPath, QPen, QPixmap, QRegion)
 from PySide6.QtWidgets import (QApplication, QHBoxLayout, QLabel, QListWidget,
@@ -37,16 +38,20 @@ from PySide6.QtWidgets import (QApplication, QHBoxLayout, QLabel, QListWidget,
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 ASSET_DIR = os.path.join(APP_DIR, "assets")
 CONFIG_PATH = os.path.join(APP_DIR, "config.json")
+STATE_PATH = os.path.join(APP_DIR, "state.json")
 
+# 只放「配置」：会随源码入库，用户手动编辑，程序启动时只读一次。
 DEFAULT_CONFIG = {
     "api_url": "",
-    "auto_poll": False,          # 关闭自动轮询：不再定时拉取/弹提醒
+    "auto_poll": False,          # 定时拉取，默认关闭；仅 api_url 非空时才会启动
     "poll_interval_minutes": 3,
     "notify_system": True,
     "pet_width": 60,
     "idle_sleep_seconds": 180,   # 无操作多久后自己睡着（0 = 永不）
-    "fish": 0,                   # 喂过的小鱼干数量
 }
+
+# 只放「运行时状态」：每次互动都会写，不入库。
+DEFAULT_STATE = {"fish": 0}
 
 # 待机随机动作的间隔区间（秒）
 IDLE_INTERVAL_RANGE = (4.5, 11.0)
@@ -249,7 +254,7 @@ class PetWindow(QWidget):
 
     PAD = 8
 
-    def __init__(self, cfg, source):
+    def __init__(self, cfg, source, state=None):
         # NoDropShadowWindowHint：关掉 macOS 给窗口加的系统投影。
         # 无边框透明窗口的投影是按「窗口矩形」模糊生成的，会在角色背后投出一个
         # 灰色方块/暗轮廓（动作播放时遮罩变矩形会更明显）。
@@ -265,12 +270,13 @@ class PetWindow(QWidget):
         self.setAttribute(Qt.WA_MacAlwaysShowToolWindow, True)
 
         self.cfg = cfg
+        self.state = state if state is not None else load_state(cfg)
         self.source = source
         self.posts = []
         self.seen = set()
         self.paused = False
         self.first_load = True
-        self.fish = int(cfg.get("fish", 0) or 0)
+        self.fish = int(self.state.get("fish", 0) or 0)
 
         # 素材
         self.pm_open = self._load("pet.png")
@@ -304,6 +310,7 @@ class PetWindow(QWidget):
         # 动画状态（必须在 _apply_mask 之前初始化）
         self._breath = 0.0
         self._bob = 0.0
+        self._last_tick_t = 0.0     # 上一次 _tick 的时间；呼吸按真实秒数累加
         self._act = None            # (名字, 起始时间, 时长, 函数)
         self._act_active = False
         self._tf = (0.0, 0.0, 0.0, 1.0, 1.0, False)
@@ -350,6 +357,17 @@ class PetWindow(QWidget):
         self.bubble_timer = QTimer(self)
         self.bubble_timer.setSingleShot(True)
         self.bubble_timer.timeout.connect(self._hide_bubble)
+
+        # 自动轮询：默认关闭；接了真实接口后把 auto_poll 打开即可按分钟拉新帖。
+        # 演示数据模式下不启动，避免每几分钟用假数据弹一次提醒。
+        self.poll_timer = QTimer(self)
+        self.poll_timer.timeout.connect(self.refresh)
+        if cfg.get("auto_poll") and str(cfg.get("api_url") or "").strip():
+            try:
+                minutes = max(1, int(cfg.get("poll_interval_minutes") or 3))
+            except (TypeError, ValueError):
+                minutes = 3
+            self.poll_timer.start(minutes * 60 * 1000)
 
         QTimer.singleShot(1200, lambda: self.say("点我看看热帖～右键有菜单", 4200))
 
@@ -471,6 +489,7 @@ class PetWindow(QWidget):
         self._act_active = True
         self._apply_mask()
         self.touch()
+        self.timer.setInterval(60)    # 立刻提帧，别等下一拍才动起来
 
     def _lean_target(self, vx):
         """把拖动速度(px/s)映射成倾斜角度(度)。
@@ -532,7 +551,11 @@ class PetWindow(QWidget):
         self.idle_timer.start(int(random.uniform(*IDLE_INTERVAL_RANGE) * 1000))
 
     def _tick(self):
-        self._breath += 0.075 if not self.sleeping else 0.035
+        now = time.monotonic()
+        dt = min(0.25, now - self._last_tick_t) if self._last_tick_t else 0.06
+        self._last_tick_t = now
+        # 呼吸按真实秒数累加（原来按 60ms 步进），降帧后节奏不会跟着变慢
+        self._breath += dt * (1.25 if not self.sleeping else 0.583)
         amp = 2.4 if not self.sleeping else 1.2
         self._bob = math.sin(self._breath) * amp
         self._update_lean()
@@ -541,9 +564,31 @@ class PetWindow(QWidget):
         sleep_after = int(self.cfg.get("idle_sleep_seconds", 180) or 0)
         if (sleep_after and not self.sleeping and not self._act
                 and not self._dragging and not self.panel.isVisible()
-                and time.monotonic() - self.last_interact > sleep_after):
+                and now - self.last_interact > sleep_after):
             self.sleep()
         self.update()
+        self._sync_frame_rate()
+
+    def _sync_frame_rate(self):
+        """按状态调帧：动作/拖动 16.7fps，静止 6.7fps，睡觉 3.3fps。
+
+        常驻 60ms 会让一个十来小时的后台进程一直做无意义的整窗重绘；
+        呼吸、倾斜、动作全都按真实时间计算，降帧不会改变动画速度。
+        """
+        anim = getattr(self, "bubble_alpha_anim", None)
+        fading = anim is not None and anim.state() != QAbstractAnimation.Stopped
+        busy = (self._act or self._dragging or abs(self._drag_lean) > 0.15
+                or self.blinking or fading)
+        if busy:
+            interval = 60
+        elif self.sleeping and not self.bubble_text:
+            interval = 300
+        elif self.bubble_text:
+            interval = 120
+        else:
+            interval = 150
+        if self.timer.interval() != interval:
+            self.timer.setInterval(interval)
 
     def _blink(self):
         if not self.sleeping and not self.blinking:
@@ -590,6 +635,7 @@ class PetWindow(QWidget):
         self._apply_mask()
         self._fade_bubble(0.0, 1.0, 160)
         self.bubble_timer.start(ms)
+        self.timer.setInterval(60)    # 气泡淡入期间保持流畅
         self.update()
 
     def _hide_bubble(self):
@@ -733,6 +779,7 @@ class PetWindow(QWidget):
                 self._lean_v = 0.0
                 self._move_hist = [(time.monotonic(), gp.x())]
                 self._apply_mask()
+                self.timer.setInterval(60)   # 拖动期间保持 16.7fps
             self.move(gp - self._drag_pos)
 
             # 用最近 100ms 的平均速度，而不是单次事件的瞬时速度：
@@ -819,10 +866,10 @@ class PetWindow(QWidget):
         ]))
 
     def _save_fish(self):
+        # 只写 state.json（已被 .gitignore 忽略），喂鱼不会再弄脏仓库
+        self.state["fish"] = self.fish
         try:
-            self.cfg["fish"] = self.fish
-            with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-                json.dump(self.cfg, f, ensure_ascii=False, indent=2)
+            _write_json(STATE_PATH, self.state)
         except Exception:
             pass
 
@@ -1042,26 +1089,70 @@ class HotPanel(QWidget):
 
 
 # ----------------------------------------------------------------------
+def _write_json(path, data):
+    """原子写：先写临时文件再替换，避免写到一半被中断留下坏 JSON。"""
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+        f.write("\n")
+    os.replace(tmp, path)
+
+
 def load_config():
     cfg = dict(DEFAULT_CONFIG)
     try:
         with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-            cfg.update(json.load(f))
+            raw = json.load(f)
+        if isinstance(raw, dict):
+            cfg.update(raw)
+    except FileNotFoundError:
+        try:
+            _write_json(CONFIG_PATH, cfg)   # 首次运行才创建
+        except Exception:
+            pass
     except Exception:
-        pass
-    try:
-        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-            json.dump(cfg, f, ensure_ascii=False, indent=2)
-    except Exception:
+        # 配置写坏了时用默认值跑，但不覆盖用户文件
         pass
     return cfg
+
+
+def load_state(cfg=None):
+    """读取运行时状态；旧版把 fish 存在 config.json 里，这里做一次性迁移。"""
+    state = dict(DEFAULT_STATE)
+    if os.path.exists(STATE_PATH):
+        try:
+            with open(STATE_PATH, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+            if isinstance(raw, dict):
+                state.update(raw)
+        except Exception:
+            pass
+        return state
+
+    if cfg and "fish" in cfg:
+        try:
+            state["fish"] = int(cfg.get("fish") or 0)
+        except (TypeError, ValueError):
+            pass
+    try:
+        _write_json(STATE_PATH, state)
+    except Exception:
+        pass
+    if cfg and "fish" in cfg:
+        cfg.pop("fish", None)               # 迁移后配置里不再留这个字段
+        try:
+            _write_json(CONFIG_PATH, cfg)
+        except Exception:
+            pass
+    return state
 
 
 def main():
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
     cfg = load_config()
-    pet = PetWindow(cfg, DataSource(cfg))
+    state = load_state(cfg)
+    pet = PetWindow(cfg, DataSource(cfg), state)
     pet.show()
 
     tray = QSystemTrayIcon(QIcon(QPixmap(os.path.join(ASSET_DIR, "pet.png"))))
