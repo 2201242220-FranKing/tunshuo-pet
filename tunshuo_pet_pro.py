@@ -239,6 +239,10 @@ class PetWindow(QWidget):
         cached_defs = ae.normalize_defs(self.studio.get("actions", {}).get("defs"))
         self.action_defs = cached_defs or list(DEFAULT_ACTION_DEFS)
         self.action_map = ae.to_map(self.action_defs)
+        if int(self.studio.get("revision", 0)) > 0 and not cached_defs:
+            # 缓存是旧版桌宠写的（没有动作定义），版本号又相同不会触发更新：
+            # 标记一次强制同步，让首次拉取把工作台的动作数据补进缓存。
+            self._studio_force = True
         if int(self.studio.get("revision", 0)) == 0:
             # 从未同步过工作台：沿用 config.json 的老配置，保证升级后行为不变
             self.studio["settings"]["notify"] = bool(cfg.get("notify_system", True))
