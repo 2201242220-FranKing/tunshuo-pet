@@ -14,6 +14,8 @@ import os
 import re
 import urllib.request
 
+import action_engine as ae
+
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 CACHE_PATH = os.path.join(APP_DIR, "studio_cache.json")
 ACC_DIR = os.path.join(APP_DIR, "assets", "accessories")
@@ -37,6 +39,7 @@ DEFAULT_STUDIO = {
         "idle_min": 4.5, "idle_max": 11.0, "speed": 1.0,
         "enabled": {},
         "weights": {"sway": 2, "look": 2, "stretch": 1, "hop": 1, "nod": 1},
+        "defs": [],              # 工作台发布的动作定义；空 = 桌宠用 actions.json 默认值
     },
     "settings": {
         "notify": True, "auto_sleep_seconds": 180,
@@ -75,6 +78,7 @@ def normalize(raw):
     hi = _num(ac.get("idle_max"), 1.0, 120.0, 11.0)
     d["actions"]["idle_min"], d["actions"]["idle_max"] = min(lo, hi), max(lo, hi)
     d["actions"]["speed"] = _num(ac.get("speed"), 0.5, 2.0, 1.0)
+    d["actions"]["defs"] = ae.normalize_defs(ac.get("defs"))
     en = ac.get("enabled") if isinstance(ac.get("enabled"), dict) else {}
     wt = ac.get("weights") if isinstance(ac.get("weights"), dict) else {}
     for k, v in en.items():

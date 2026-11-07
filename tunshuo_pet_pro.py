@@ -27,6 +27,7 @@ import time
 import urllib.request
 
 import studio_sync as ss
+import action_engine as ae
 
 from PySide6.QtCore import (QAbstractAnimation, QEasingCurve, QPoint, QRectF,
                             QSize, Qt, QThread, QTimer, QVariantAnimation,
@@ -94,83 +95,14 @@ PHRASES = [
 
 
 # ======================================================================
-# 动作注册表
-#   每个动作是一个函数 fn(pet, t)，t 在 0..1 之间表示动作进度；
-#   返回 6 元组：(横向位移, 纵向位移, 旋转角度, 横向缩放, 纵向缩放, 是否水平翻转)
-#   想加新动作：照抄下面任意一个，写个 @action("名字", 秒数) 即可，其它地方不用改。
+# 动作数据（数据驱动，见 action_engine.py / actions.json）
+#   · 默认动作从 actions.json 载入：每个动作是「关键帧数组 + cosine 缓动」
+#   · 工作台编辑后，已发布配置里的 actions.defs 会覆盖这里的默认值
+#   · 桌宠与网页共用同一份解释器，改动作不用再改两份代码
+#   · 想加动作：在 actions.json 的 actions 里加一项，或在工作台时间轴里新建
 # ======================================================================
-ACTIONS = {}
-
-
-def action(name, duration):
-    def deco(fn):
-        ACTIONS[name] = (duration, fn)
-        return fn
-    return deco
-
-
-def _ease_out(t):
-    return 1 - (1 - t) ** 3
-
-
-@action("hop", 0.62)                 # 原地蹦一下（起跳压缩 + 落地挤压）
-def _hop(pet, t):
-    dy = -58 * math.sin(math.pi * t)
-    squash = 1.0
-    if t < 0.12:
-        squash = 1 - 0.10 * math.sin(math.pi * t / 0.12)
-    elif t > 0.86:
-        squash = 1 - 0.13 * math.sin(math.pi * (t - 0.86) / 0.14)
-    return 0, dy, 0, 1 / squash ** 0.5, squash, False
-
-
-@action("sway", 1.6)                 # 左右摇摆（不倒翁）
-def _sway(pet, t):
-    decay = math.exp(-1.1 * t)
-    return 0, -3 * abs(math.sin(2 * math.pi * t)), 12 * math.sin(2.4 * math.pi * t) * decay, 1, 1, False
-
-
-@action("look", 2.0)                 # 左右张望（镜像转身 + 微微前倾）
-def _look(pet, t):
-    if t < 0.08 or t > 0.92:
-        return 0, 0, 0, 1, 1, False
-    lean = 4 * math.sin(math.pi * (t - 0.08) / 0.84)
-    return 0, -1, lean, 1, 1, getattr(pet, "_look_flip", False)
-
-
-@action("stretch", 1.3)              # 伸懒腰（拉长 + 变窄）
-def _stretch(pet, t):
-    k = math.sin(math.pi * t)
-    return 0, -7 * k, 0, 1 - 0.08 * k, 1 + 0.11 * k, False
-
-
-@action("nod", 0.9)                  # 点头两次
-def _nod(pet, t):
-    k = abs(math.sin(2 * math.pi * t))
-    return 0, 9 * k, 0, 1 + 0.04 * k, 1 - 0.05 * k, False
-
-
-@action("shake", 0.5)                # 被点时的抖动
-def _shake(pet, t):
-    return 11 * math.sin(8 * math.pi * t) * math.exp(-1.4 * t), 0, 0, 1, 1, False
-
-
-@action("land", 0.34)                # 松手落地时的挤压
-def _land(pet, t):
-    k = math.sin(math.pi * t)
-    return 0, 3 * k, 0, 1 + 0.10 * k, 1 - 0.12 * k, False
-
-
-@action("dance", 1.5)                # 连蹦带歪（连点彩蛋）
-def _dance(pet, t):
-    hop = abs(math.sin(3 * math.pi * t))
-    tilt = 11 * math.sin(3 * math.pi * t + 0.5) * math.exp(-0.6 * t)
-    return 0, -24 * hop, tilt, 1, 1, False
-
-
-@action("wobble", 0.8)               # 被拖动后的余震
-def _wobble(pet, t):
-    return 0, 0, 12 * math.sin(3 * math.pi * t) * math.exp(-2.4 * t), 1, 1, False
+DEFAULT_ACTION_DEFS = ae.load_file(os.path.join(APP_DIR, "actions.json"))
+ACTIONS = ae.to_map(DEFAULT_ACTION_DEFS)      # 默认快照（离线 / 未接工作台时用）
 
 
 # ----------------------------------------------------------------------
@@ -303,6 +235,10 @@ class PetWindow(QWidget):
         # 形象工作台：先用上一次的本地缓存启动（断网也能保持形象），
         # 稍后再联网拉「已发布」配置。没接工作台时 studio 就是内置默认值。
         self.studio = ss.load_cache()
+        # 动作定义：优先用工作台已发布的版本，离线时回落到 actions.json
+        cached_defs = ae.normalize_defs(self.studio.get("actions", {}).get("defs"))
+        self.action_defs = cached_defs or list(DEFAULT_ACTION_DEFS)
+        self.action_map = ae.to_map(self.action_defs)
         if int(self.studio.get("revision", 0)) == 0:
             # 从未同步过工作台：沿用 config.json 的老配置，保证升级后行为不变
             self.studio["settings"]["notify"] = bool(cfg.get("notify_system", True))
@@ -347,10 +283,11 @@ class PetWindow(QWidget):
         self._breath = 0.0
         self._bob = 0.0
         self._last_tick_t = 0.0     # 上一次 _tick 的时间；呼吸按真实秒数累加
-        self._act = None            # (名字, 起始时间, 时长, 函数)
+        self._act = None            # (名字, 起始时间, 时长, 动作定义 dict)
         self._act_active = False
         self._tf = (0.0, 0.0, 0.0, 1.0, 1.0, False)
         self._look_flip = False
+        self._act_flip = False      # flip_random 动作本次播放是否翻转
 
         mask_src = QPixmap(os.path.join(ASSET_DIR, "pet.png")).scaledToWidth(
             pet_w, Qt.SmoothTransformation)
@@ -549,14 +486,15 @@ class PetWindow(QWidget):
 
     # ---------- 动作调度 ----------
     def play(self, name):
-        if name not in ACTIONS or self.sleeping:
+        if name not in self.action_map or self.sleeping:
             return
         act_cfg = self.studio["actions"]
         if act_cfg["enabled"].get(name, True) is False:   # 工作台里关掉的动作不播
             return
-        dur, fn = ACTIONS[name]
-        dur /= max(0.1, float(act_cfg["speed"]))           # 速度倍率：>1 变快
-        self._act = (name, time.monotonic(), dur, fn)
+        d = self.action_map[name]
+        dur = float(d["duration"]) / max(0.1, float(act_cfg["speed"]))  # 速度倍率：>1 变快
+        self._act_flip = random.random() < 0.5 if d.get("flip_random") else False
+        self._act = (name, time.monotonic(), dur, d)
         self._act_active = True
         self._apply_mask()
         self.touch()
@@ -603,7 +541,7 @@ class PetWindow(QWidget):
         if not self._act:
             self._tf = (0.0, 0.0, self._drag_lean, 1.0, 1.0, False)
             return
-        name, t0, dur, fn = self._act
+        name, t0, dur, action_def = self._act
         t = (time.monotonic() - t0) / dur
         if t >= 1.0:
             self._act = None
@@ -611,22 +549,19 @@ class PetWindow(QWidget):
             self._tf = (0.0, 0.0, 0.0, 1.0, 1.0, False)
             self._apply_mask()
             return
-        self._tf = fn(self, max(0.0, t))
+        self._tf = ae.evaluate(action_def, max(0.0, t), self._act_flip)
 
     def _idle_pick(self):
         if not (self._act or self.sleeping or self.panel.isVisible() or self._dragging):
-            # 只有待机候选会随机抽到；权重来自工作台，默认 2/2/1/1/1 与原版一致
+            # 待机候选由动作数据的 idle_weight 决定；工作台的权重滑块可覆盖它，
+            # 因此新增/删除动作都能立刻影响待机，不用再改这里的名单。
             act_cfg = self.studio["actions"]
-            pool = []
-            for k in IDLE_POOL:
-                if act_cfg["enabled"].get(k, True) is False:
-                    continue
-                pool.extend([k] * int(act_cfg["weights"].get(k, 1)))
+            weights = act_cfg.get("weights", {})
+            merged = [dict(d, idle_weight=int(weights.get(d["key"], d["idle_weight"])))
+                      for d in self.action_defs]
+            pool = ae.idle_pool(merged, act_cfg["enabled"])
             if pool:
-                name = random.choice(pool)
-                if name == "look":
-                    self._look_flip = random.random() < 0.5
-                self.play(name)
+                self.play(random.choice(pool))
         ac = self.studio["actions"]
         self.idle_timer.start(int(random.uniform(ac["idle_min"], ac["idle_max"]) * 1000))
 
@@ -987,8 +922,8 @@ class PetWindow(QWidget):
         if self.sleeping:
             self.wake()
             return
-        self._look_flip = random.random() < 0.5
-        self.play(random.choice(list(ACTIONS.keys())))
+        if self.action_map:
+            self.play(random.choice(list(self.action_map)))
 
     def _menu(self, gp):
         m = QMenu(self)
@@ -1071,6 +1006,10 @@ class PetWindow(QWidget):
 
     def _apply_studio(self):
         """把配置落成绘制状态（主线程里构建 QPixmap）。"""
+        # 工作台发布的动作定义覆盖本地默认值；下发为空/脏数据时保持默认，不让小豚瘫掉
+        synced = ae.normalize_defs(self.studio.get("actions", {}).get("defs"))
+        self.action_defs = synced or list(DEFAULT_ACTION_DEFS)
+        self.action_map = ae.to_map(self.action_defs)
         self.studio_acc = ss.build_pixmaps(self.studio, self.pet_w)
         self.studio_scale = float(self.studio["appearance"]["scale"])
         self._apply_mask()
