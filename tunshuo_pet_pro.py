@@ -177,18 +177,28 @@ class DataSource:
         with urllib.request.urlopen(req, timeout=10) as r:
             data = json.loads(r.read().decode("utf-8"))
         posts = data.get("posts") if isinstance(data, dict) else data
+        if not isinstance(posts, list):
+            raise ValueError("接口返回的 posts 不是数组")
         out = []
-        for i, p in enumerate(posts or []):
+        for i, p in enumerate(posts[:100]):        # 一次最多渲染 100 条
             if not isinstance(p, dict):
                 continue
+            try:
+                heat = int(float(p.get("heat", 0) or 0))
+            except (TypeError, ValueError):
+                heat = 0                          # 脏数据不该让整批帖子作废
+            link = p.get("url")
+            # 只放行 http(s)：避免接口返回 javascript:/file: 之类的链接被双击打开
+            if not (isinstance(link, str) and link.startswith(("http://", "https://"))):
+                link = None
             out.append({
                 "id": str(p.get("id", p.get("title", i))),
-                "title": str(p.get("title", "(无标题)")),
-                "author": str(p.get("author", "豚友")),
-                "tag": str(p.get("tag", "")),
-                "heat": int(p.get("heat", 0) or 0),
-                "time": str(p.get("time", "")),
-                "url": p.get("url"),
+                "title": str(p.get("title") or "(无标题)")[:120],
+                "author": str(p.get("author") or "豚友")[:60],
+                "tag": str(p.get("tag") or "")[:30],
+                "heat": heat,
+                "time": str(p.get("time") or "")[:30],
+                "url": link,
             })
         return out
 
@@ -1008,11 +1018,12 @@ class HotPanel(QWidget):
 
     def _open(self, item):
         url = item.data(Qt.UserRole)
-        if url:
+        # 双保险：即使数据来自别处，也只允许 http(s) 链接交给系统浏览器
+        if isinstance(url, str) and url.startswith(("http://", "https://")):
             import webbrowser
             webbrowser.open(url)
         else:
-            self.pet.say("这条是演示数据，还没有链接～")
+            self.pet.say("这条没有可打开的链接～")
 
     def show_near_pet(self):
         # 面板跟宠物所在的同一块屏幕对齐

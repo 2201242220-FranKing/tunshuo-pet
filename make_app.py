@@ -5,15 +5,16 @@
 
 用法：
     python3 make_app.py            # 生成并安装到 ~/Applications/豚说小豚.app
+    TUNSHUO_INSTALL_DIR=/some/path python3 make_app.py   # 自定义安装位置
 
-产物结构：
-    豚说小豚.app/Contents/
-        Info.plist            LSUIElement=true（不在 Dock 显示、不占 Cmd+Tab）
-        MacOS/launcher        启动脚本（内部调 python 跑主程序，无终端窗口）
-        Resources/pet.icns    从 assets/pet.png 生成的图标
+运行时可通过环境变量覆盖：
+    TUNSHUO_PET_DIR   源码目录（换机器/换路径时不用重新打包）
+    PET_PYTHON        Python 解释器路径
+    TUNSHUO_INSTALL_DIR（仅打包时）  .app 安装位置
 
-说明：这是"本机自用"的轻量方案，体积 ~0MB，依赖本机已装好的 Python + PySide6。
-要拷给别人用，需要另一条路线（PyInstaller 打包自带解释器，体积 ~200MB）。
+说明：这是轻量方案，依赖本机已装好的 Python + PySide6；启动器会优先用打包时记录的
+解释器，找不到时自动探测 .venv / PET_PYTHON / PATH。要拷给别人用，在对方机器上
+重新执行一次 make_app.py 即可；若要完全自包含，需要另走 PyInstaller 路线（体积约 200MB）。
 """
 
 import os
@@ -24,20 +25,38 @@ import sys
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 APP_NAME = "豚说小豚.app"
-INSTALL_DIR = os.path.expanduser("~/Applications")
+INSTALL_DIR = os.environ.get("TUNSHUO_INSTALL_DIR") or os.path.expanduser("~/Applications")
 BUILD_DIR = os.path.join(APP_DIR, "build")
 BUNDLE_ID = "online.tunshuo.pet"
 
 LAUNCHER = """#!/bin/sh
 # 豚说小豚 启动器（由 make_app.py 生成）
-PET_DIR="{pet_dir}"
-PY="{python}"
+# 换机器请重新执行一次 make_app.py；也可用环境变量覆盖源码目录和安装位置。
+PET_DIR="${{TUNSHUO_PET_DIR:-{pet_dir}}}"
 LOG="$HOME/Library/Logs/tunshuo-pet.log"
 mkdir -p "$(dirname "$LOG")"
 
 # 单实例保护：已经在跑就不再开第二只
 if pgrep -f "$PET_DIR/tunshuo_pet_pro.py" >/dev/null 2>&1; then
   exit 0
+fi
+
+# 解释器：优先用打包时记录的（本机一定可用）；文件不存在（换机器/升级 Python）
+# 时依次探测项目 venv、PET_PYTHON 环境变量、PATH 里的 python3。
+PY="{python}"
+if [ ! -x "$PY" ]; then
+  if [ -x "$PET_DIR/.venv/bin/python3" ]; then
+    PY="$PET_DIR/.venv/bin/python3"
+  elif [ -n "$PET_PYTHON" ] && [ -x "$PET_PYTHON" ]; then
+    PY="$PET_PYTHON"
+  elif command -v python3 >/dev/null 2>&1; then
+    PY="$(command -v python3)"
+  fi
+fi
+
+if ! "$PY" -c 'import PySide6' >/dev/null 2>&1; then
+  echo "PySide6 不可用，请先安装依赖：\\"$PY\\" -m pip install -r requirements.txt" >>"$LOG"
+  exit 1
 fi
 
 cd "$PET_DIR" || exit 1
