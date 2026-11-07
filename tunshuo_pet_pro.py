@@ -244,10 +244,10 @@ class PetWindow(QWidget):
             cached_defs = cached_defs + [d for d in DEFAULT_ACTION_DEFS if d["key"] not in have]
         self.action_defs = cached_defs or list(DEFAULT_ACTION_DEFS)
         self.action_map = ae.to_map(self.action_defs)
-        if int(self.studio.get("revision", 0)) > 0 and not cached_defs:
-            # 缓存是旧版桌宠写的（没有动作定义），版本号又相同不会触发更新：
-            # 标记一次强制同步，让首次拉取把工作台的动作数据补进缓存。
-            self._studio_force = True
+        # 旧版桌宠写的缓存可能缺后加的字段（动作定义、关节皮肤引用等），
+        # 而 revision 相同会让 _on_studio 直接 return，导致「素材下载了却没切过去」。
+        # 因此启动后首次同步一律强制应用一次；same=True 时不会触发换装提示 / hop。
+        self._studio_force = True
         if int(self.studio.get("revision", 0)) == 0:
             # 从未同步过工作台：沿用 config.json 的老配置，保证升级后行为不变
             self.studio["settings"]["notify"] = bool(cfg.get("notify_system", True))
@@ -1120,7 +1120,8 @@ class PetWindow(QWidget):
         w = getattr(self, "_studio_worker", None)
         if w is not None and w.isRunning():
             return
-        self._studio_force = bool(force)
+        # 启动时设的「首次强制同步」不能被定时轮询的 force=False 覆盖掉
+        self._studio_force = bool(force) or bool(getattr(self, "_studio_force", False))
         w = StudioFetcher(self.studio_url)
         w.ok.connect(self._on_studio)
         w.fail.connect(self._on_studio_fail)
