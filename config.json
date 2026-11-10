@@ -6,5 +6,14 @@
   "pet_width": 60,
   "idle_sleep_seconds": 180,
   "studio_url": "http://127.0.0.1:8770",
-  "studio_sync_seconds": 20
+  "studio_sync_seconds": 20,
+  "forum_base": "https://alumni.qiyuanheshan.com",
+  "forum_circle_id": "1844924022131912706",
+  "forum_allow_all": false,
+  "forum_circles": [
+    {
+      "id": "1844924022131912706",
+      "name": "浙外"
+    }
+  ]
 }

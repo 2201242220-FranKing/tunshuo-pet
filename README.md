@@ -12,7 +12,7 @@
 - **事件状态机**：来新帖 → 抬手播报（`announce`）、被拖动 → 手脚挣扎（`struggle`）、点击摸头 → 歪头（`nuzzle`）、待机 → 呼吸（`breathe`）；找不到对应触发动作时自动回落到原有逻辑。
 - **待机随机动作**：每隔 4.5~11 秒随机播一个动作，另有随机眨眼、呼吸浮动。
 - **拖动倾斜**：按最近 100ms 的平均速度计算倾斜角，慢拖也有明显反应，甩到 1200px/s 吃满 30°；松手有边缘吸附和回弹余震。
-- **热帖播报**：内置演示数据；填入 `api_url`（旧单接口）或配置 `forum_base`（新 REST 适配层）后可切到真实论坛接口。首次刷新只建立基线、不误报新帖；打开 `auto_poll` 后按分钟定时拉取。
+- **热帖播报**：可同时监控多个学校圈子（按 `circleId` 逐个拉取后合并出榜，条目带学校简称）；当前已接浙外真实数据。也可回退到内置演示数据。首次刷新只建立基线、不误报新帖；自动轮询默认关闭，手动「立即刷新」才拉。
 - **状态**：连点 5 次跳舞、右键喂小鱼干、180 秒无操作自动睡觉（zzz），点击唤醒。
 - **按需调帧**：动作/拖动 16.7fps、静止 6.7fps、睡觉 3.3fps；呼吸、倾斜、动作都按真实时间计算，降帧不会让动画变慢，长时间常驻更省电。
 - **形象工作台**：配套网站 `tunshuo-pet-studio/` 可以可视化改外观、动作、台词、配饰，上传并切换整套皮肤包；发布后桌宠自动同步，皮肤素材下载到 `assets/skins/`。配饰画在角色的同一个变换里，跳起/倾斜时不会飘掉；`attach` 字段还能把帽子挂到头部、围巾挂到身体。断网时沿用上一次的形象。
@@ -101,7 +101,7 @@ python3 make_app.py
 
 `id` 缺省时用 `title` 去重；`heat` 允许数字或数字字符串，脏数据会降级为 0；`url` 只放行 `http://` / `https://`；一次最多取 100 条。
 
-### 论坛 REST 接口适配层（已按真实响应校准，默认不启用）
+### 论坛 REST 接口适配层（已按真实响应校准；当前启用浙外单校测试）
 
 线上地址 `https://alumni.qiyuanheshan.com`。技术提供的接口：`/app/dynamic/page` 最新帖子、`/app/dynamic/new/num` 新帖提醒数、`/app/dynamic/ten/page` 十大热帖、`/app/dynamic/detail` 帖子详情。**上面的 `api_url` 是旧的单接口约定，继续有效**；新接口走 `forum_api.py`，聚合成同样的 7 字段列表，因此 `_on_posts()` 去重播报、`HotPanel` 排序渲染、双击打开链接全部零改动。
 
@@ -131,7 +131,9 @@ python3 make_app.py
 | config.json 字段 | 默认 | 说明 |
 |---|---|---|
 | `forum_base` | `""` | **唯一启用开关**。留空 → `make_source()` 原样返回旧 `DataSource`，继续用演示数据，零回归；启用填 `https://alumni.qiyuanheshan.com` |
-| `forum_circle_id` | `""` | 学校圈子 circleId（小程序首页带的值）。**不传时接口不按学校筛选**，所以未配置会明确报错 |
+| `forum_circle_id` | `""` | 单个学校圈子 circleId（旧写法，继续兼容）。**不传时接口不按学校筛选**，所以未配置会明确报错 |
+| `forum_circles` | `[]` | **多学校列表**：`[{"id":"圈子ID","name":"学校简称"}, ...]`，最多 20 个。非空时优先于 `forum_circle_id` |
+| `forum_tag_circle` | `true` | 多学校时在条目标签前加学校简称（如「浙外·宣传推广」），单学校不加 |
 | `forum_allow_all` | `false` | 设为 `true` 才允许不传 circleId 拉全站 |
 | `forum_token_header` | `Authorization` | 令牌字段名；**令牌值只从环境变量 `TUNSHUO_FORUM_TOKEN` 读，绝不写进会入库的 config.json** |
 | `forum_detail_url` | `""` | 原帖 H5 链接模板，用 `{id}` 占位；拼出的链接仍只放行 http(s) |
@@ -145,21 +147,27 @@ python3 make_app.py
 **自检命令**（都不写任何配置）：
 
 ```bash
-python3 forum_api.py --selftest                          # 49 项离线自测，不发网络请求
+python3 forum_api.py --selftest                          # 67 项离线自测，不发网络请求
 python3 forum_api.py --live --circle-id <学校圈子ID>     # 真实只读联调，作者自动打码
 python3 forum_api.py --live --all                        # 不带圈子 ID，拉全站（仅验证用）
 ```
 
-**启用（用 `enable_forum.py`，默认只预览不写盘）**：
+**多学校监控**：`forum_circles` 里每加一个学校，桌宠下次刷新就会多拉一个圈子，合并成一张按热度排序的榜单；条目标签会带学校简称。某个学校接口失败只影响它自己，其他学校照常出榜；全部失败时沿用上一轮结果，不会清空榜单。帖子若带 `circleId` 但与请求的圈子不符会被丢弃，防止 ID 填错或服务端回落全站时串进别校数据。上限 20 个学校，`seen` 去重上限已从 200 提到 1000，避免多学校时旧帖被误判成新帖。旧的 `forum_circle_id` 单值写法继续有效。
+
+**启用 / 增删学校（用 `enable_forum.py`，默认只预览不写盘）**：
 
 ```bash
-python3 enable_forum.py --status                          # 看当前是否启用
-python3 enable_forum.py --circle-id <学校圈子ID>          # 预览改动 + 只读联调
-python3 enable_forum.py --circle-id <学校圈子ID> --apply  # 确认后才写 config.json
-python3 enable_forum.py --off --apply                     # 一键回退到演示数据
+python3 enable_forum.py --list                                # 看当前监控了哪些学校
+python3 enable_forum.py --add <圈子ID> --name <简称>           # 预览 + 只读联调
+python3 enable_forum.py --add <圈子ID> --name <简称> --apply   # 正式加入（重复 ID 只更新名称）
+python3 enable_forum.py --remove <圈子ID> --apply             # 移除一个学校；移空则回退演示数据
+python3 enable_forum.py --off --apply                        # 一键清空回退
+python3 enable_forum.py --circle-id <圈子ID> --apply         # 旧写法：只监控一个学校
 ```
 
-脚本只改 `forum_base` / `forum_circle_id` / `forum_allow_all` 三个键，其余配置原样保留，**令牌永远不写盘**；也不会替你重启桌宠。写入后退出并重启 `.app` → 右键「立即刷新」，首次刷新只建立基线不误报新帖。若要定时播报，再单独把 `auto_poll` 设为 `true`（轮询条件已兼容 `api_url` 或 `forum_base` 任一配好）；当前按用户要求保持关闭。
+脚本只改 `forum_base` / `forum_circles` / `forum_circle_id` / `forum_allow_all` 四个键，其余配置原样保留，**令牌永远不写盘**；也不会替你重启桌宠。写入后退出并重启 `.app` → 右键「立即刷新」，首次刷新只建立基线不误报新帖。若要定时播报，再单独把 `auto_poll` 设为 `true`（轮询条件已兼容 `api_url` 或 `forum_base` 任一配好）；当前按用户要求保持关闭。
+
+**当前现场状态（2026-11-10）**：已启用浙外圈子 `1844924022131912706`（名称「浙外」）做测试，桌宠已重启加载真实数据；其余学校 ID 待用户提供后用 `--add` 追加。
 
 **仍需技术确认**：学校 `circleId` 实际值、十大热帖/新帖数需登录（返回 `code=110 请先登录`）、原帖 H5 链接规则、`new/num` 的 `time` 语义与 `tagId` 枚举、站内信未读的正确路径。可直接转发 `论坛接口待确认清单.txt`（已标注哪些项实测通过、不用重复给）。技术文档里「十大热帖」和「站内信 提醒未读消息」写成了同一个 `GET /app/dynamic/ten/page?circleId=`，疑似笔误；`ForumClient.unread()` 已保留但默认抛明确错误，路径确认后改 `UNREAD_PATH` 即可，站内信角标属于新 UI，尚未实现。
 
@@ -186,7 +194,7 @@ tunshuo-pet/
 ├── action_engine.py       动作解释器：数据校验 / 缓动插值 / 部件通道
 ├── skin_rig.py            皮肤 manifest 校验、父子变换链、z 序、包围盒
 ├── forum_api.py           论坛 REST 适配层（真实字段已校准，默认不启用，可离线/联网自检）
-├── enable_forum.py        论坛接口一键启用/回退（默认只预览，--apply 才写配置）
+├── enable_forum.py        论坛接口启用/回退/增删学校（默认只预览，--apply 才写配置）
 ├── 论坛接口待确认清单.txt   可直接转发技术的追问清单（含已实测通过的项）
 ├── make_app.py            macOS .app 打包脚本
 ├── config.json            用户配置（入库）
@@ -215,7 +223,7 @@ python3 assets/process_sprite.py
 ## 已知限制
 
 - 仅 macOS；Windows / Linux 上托盘通知、打包脚本与部分窗口属性不适用。
-- 默认使用演示数据；论坛适配层已按真实响应校准且完整联调通过，但**尚未启用**（`forum_base` 留空）。自动轮询按用户要求保持关闭。启用还需要学校 `circleId`；十大热帖与新帖数接口需登录，当前会自动降级为「最新帖按热度出榜」，双击打开原帖待技术给 H5 链接规则。
+- 已启用浙外真实数据做测试，自动轮询按用户要求保持关闭（只有右键「立即刷新」才拉一次）。十大热帖与新帖数接口需登录，当前自动降级为「最新帖按热度出榜」；接口不返回 url，双击打开原帖待技术给 H5 链接规则。学校 ID 目前只有浙外一个，其余待补；可用 `--off --apply` 随时回退到演示数据。
 - 形象同步依赖 `tunshuo-pet-studio/` 的服务；工作台没运行时桌宠用本地缓存继续跑，不会报错，但新发布的形象要等服务起来（或手动「重新同步形象」）才生效。不想联网就把 `studio_url` 留空。
 - `assets/skins/placeholder/` 是**程序从现有 `pet.png` 切出来的技术验证包**，不是最终美术：小角度（头 ≤10°、手 ≤35°）没有破洞，角度再大会露出同色底补的月牙。正式皮肤请按 `tunshuo-pet-studio/JOINT_SPEC.md` 重画挖空底图与部件层，直接放进工作台替换即可，代码不用改。
 - 无边框透明窗口必须关掉系统投影（`Qt.NoDropShadowWindowHint`），否则动作播放、遮罩变矩形时，macOS 会在角色背后投出一块灰黑方块。

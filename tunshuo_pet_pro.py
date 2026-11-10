@@ -64,7 +64,9 @@ DEFAULT_CONFIG = {
     # 论坛真实接口适配层（见 forum_api.py）：全部留空 = 完全不启用，继续用演示数据。
     # 令牌只从环境变量 TUNSHUO_FORUM_TOKEN 读，绝不写进这份会入库的配置。
     "forum_base": "",                      # 留空即不启用；启用填 https://alumni.qiyuanheshan.com
-    "forum_circle_id": "",                 # 学校圈子 circleId（小程序首页带的值）
+    "forum_circle_id": "",                 # 单个学校圈子 circleId（旧写法，继续兼容）
+    "forum_circles": [],                   # 多学校：[{"id":"圈子ID","name":"学校简称"}, ...]，最多 20 个
+    "forum_tag_circle": True,              # 多学校时在条目标签前加学校简称，方便分辨来源
     "forum_allow_all": False,              # True = 不传 circleId 拉全站，一般不建议
     "forum_token_header": "Authorization",
     "forum_detail_url": "",                # 原帖 H5 链接模板，{id} 占位，待技术给规则
@@ -1258,9 +1260,9 @@ class PetWindow(QWidget):
         new = [p for p in posts if p["id"] not in self.seen]
         for p in posts:
             self.seen.add(p["id"])
-        # 只保留最近 200 个 id：长期轮询时 seen 不能无限增长
-        if len(self.seen) > 200:
-            self.seen = set(list(self.seen)[-200:])
+        # 只保留最近 1000 个 id：多学校圈子时帖子更多，上限太小会把旧帖误判成新帖
+        if len(self.seen) > 1000:
+            self.seen = set(list(self.seen)[-1000:])
 
         if self.first_load:
             # 首次加载只建立"已见过"基线，不弹气泡也不发系统通知，

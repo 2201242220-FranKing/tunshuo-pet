@@ -37,6 +37,12 @@
   time        <- createTime
   url         <- 接口未返回；等技术给 H5 规则后填 config 的 forum_detail_url
 
+多学校圈子：
+  `forum_circles` 是一个数组，每项 `{"id": "圈子ID", "name": "学校简称"}`，
+  桌宠一次刷新会逐个圈子拉取再合并成一张榜单。多圈子时条目的标签前会加学校简称
+  （如「浙外·宣传推广」），方便分辨来源。旧的单值 `forum_circle_id` 继续兼容：
+  `forum_circles` 为空时自动按单圈子跑。上限 20 个圈子，避免一次刷新请求过多。
+
 设计约束：
   1. **默认完全不启用**：`forum_base` 留空时 `make_source()` 原样返回旧 DataSource，
      演示数据、气泡、热帖榜表现零回归；自动轮询仍默认关闭。
@@ -47,6 +53,7 @@
   4. **不保存令牌**：token 只从环境变量 `TUNSHUO_FORUM_TOKEN` 读，
      绝不写进会入库的 config.json / studio_cache.json。
   5. 只依赖标准库，不引入新框架。
+  6. 单个学校接口失败不影响其他学校；全部失败时沿用上一轮结果，不清空榜单。
 
 仍需技术确认：站内信未读的正确路径、原帖 H5 链接规则、学校 circleId 的实际值、
 `new/num` 的 time 语义、tagId 枚举。
@@ -99,6 +106,52 @@ SCHEMA = {
         "url": ("url", "link", "h5Url", "shareUrl", "detailUrl"),
     },
 }
+
+
+MAX_CIRCLES = 20
+
+
+def normalize_circles(cfg):
+    """把配置解析成 [{"id", "name"}]，兼容旧的单值 forum_circle_id。
+
+    优先级：forum_circles 数组 > forum_circle_id 单值 > forum_allow_all 全站。
+    返回 (圈子列表, 错误说明)；错误说明非空表示没配任何可用圈子。
+    """
+    cfg = cfg or {}
+    out = []
+    raw = cfg.get("forum_circles")
+    if isinstance(raw, list):
+        for it in raw:
+            if isinstance(it, str) and it.strip():
+                out.append({"id": it.strip(), "name": ""})
+            elif isinstance(it, dict):
+                cid = str(it.get("id") or it.get("circleId") or "").strip()
+                if cid:
+                    out.append({"id": cid, "name": str(it.get("name") or "")[:12]})
+    seen, uniq = set(), []
+    for c in out:
+        if c["id"] not in seen:
+            seen.add(c["id"])
+            uniq.append(c)
+    if uniq:
+        return uniq[:MAX_CIRCLES], ""
+    single = str(cfg.get("forum_circle_id") or "").strip()
+    if single:
+        return [{"id": single, "name": ""}], ""
+    if cfg.get("forum_allow_all"):
+        return [{"id": "", "name": "全站"}], ""
+    return [], "请配置 forum_circles 或 forum_circle_id（学校圈子 ID）"
+
+
+def _tag_posts_with_circle(posts, circle, enabled, multi):
+    """多圈子时给标签加学校简称前缀；仍是 7 字段，上层渲染零改动。"""
+    name = (circle or {}).get("name") or ""
+    if not (enabled and multi and name):
+        return posts
+    for p in posts:
+        t = str(p.get("tag") or "").strip()
+        p["tag"] = ((name + "·" + t) if t else name)[:30]
+    return posts
 
 
 class ForumError(Exception):
@@ -270,7 +323,7 @@ class ForumClient:
                     schema["post"] = dict(schema["post"], **v)
                 else:
                     schema[k] = v
-        return cls(
+        params = dict(
             base=cfg.get("forum_base"),
             circle_id=cfg.get("forum_circle_id"),
             token=os.environ.get(TOKEN_ENV, ""),
@@ -278,8 +331,9 @@ class ForumClient:
             schema=schema,
             detail_url_tpl=cfg.get("forum_detail_url") or "",
             allow_all=bool(cfg.get("forum_allow_all", False)),
-            timeout=10,
-            **kw)
+            timeout=10)
+        params.update(kw)               # 多圈子时逐个覆盖 circle_id / allow_all
+        return cls(**params)
 
     def _get(self, path, params=None):
         q = {k: v for k, v in (params or {}).items() if v not in (None, "")}
@@ -309,14 +363,32 @@ class ForumClient:
             return ""            # 不传 circleId：接口会返回全站（不按学校筛选）
         raise ForumError("请配置 forum_circle_id（学校圈子 ID）")
 
+    def _filter_circle(self, items):
+        """多学校时防串校：帖子若带 circleId 且与本圈子不符，直接丢弃。
+
+        填错 ID 或服务端对无效 ID 回落全站时，这条能把别校数据挡在榜单外；
+        帖子没带 circleId 字段则保持原样，不影响正常数据。
+        """
+        if not self.circle_id or not isinstance(items, list):
+            return items
+        out = []
+        for p in items:
+            if not isinstance(p, dict):
+                continue
+            cid = p.get("circleId") or p.get("circle_id")
+            if cid and str(cid).strip() != self.circle_id:
+                continue
+            out.append(p)
+        return out
+
     # ---- 五个接口 ----
     def latest(self, page_num=1, page_size=10, post_type="dynamic", tag_id=None):
         raw = self._get(P_LATEST, {
             "circleId": self._circle(), "pageNum": page_num, "pageSize": page_size,
             "type": post_type, "tagId": tag_id,
         })
-        return _normalize_posts(raw if isinstance(raw, list) else [], self.schema,
-                                self.detail_url_tpl)
+        return _normalize_posts(self._filter_circle(raw if isinstance(raw, list) else []),
+                                self.schema, self.detail_url_tpl)
 
     def new_count(self, since, post_type="dynamic", tag_id=None):
         raw = self._get(P_NEW_NUM, {
@@ -331,8 +403,8 @@ class ForumClient:
 
     def top_ten(self):
         raw = self._get(P_TOP_TEN, {"circleId": self._circle()})
-        posts = _normalize_posts(raw if isinstance(raw, list) else [], self.schema,
-                                 self.detail_url_tpl)
+        posts = _normalize_posts(self._filter_circle(raw if isinstance(raw, list) else []),
+                                 self.schema, self.detail_url_tpl)
         # 榜单接口可能已排好序但不返回热度值：按返回顺序补一个递减分，
         # 保证 HotPanel 按 heat 降序渲染时不至于全 0 乱序。
         if posts and all(p["heat"] == 0 for p in posts):
@@ -362,22 +434,43 @@ class ForumAdapter:
     不能只回新增条目，否则热帖榜会被清空。
     """
 
-    def __init__(self, cfg, fallback=None, client=None):
-        self.client = client or ForumClient.from_config(cfg)
+    def __init__(self, cfg, fallback=None, client=None, transport=None):
+        self.cfg = cfg or {}
         self.fallback = fallback
-        self.probe = bool(cfg.get("forum_probe", False))   # time 语义确认前默认关闭
-        self.page_size = max(1, min(50, _as_number(cfg.get("forum_page_size"), 10)))
+        self.probe = bool(self.cfg.get("forum_probe", False))   # time 语义确认前默认关闭
+        self.page_size = max(1, min(50, _as_number(self.cfg.get("forum_page_size"), 10)))
         self.fallback_size = max(self.page_size,
-                                 min(50, _as_number(cfg.get("forum_top_fallback_size"), 20)))
+                                 min(50, _as_number(self.cfg.get("forum_top_fallback_size"), 20)))
+        self.tag_circle = bool(self.cfg.get("forum_tag_circle", True))
+        self.circles, self.circle_error = normalize_circles(self.cfg)
+        self.multi = len(self.circles) > 1
+        if client is not None:
+            # 自测 / 联网自检注入传输层：保持原来的单数据源行为
+            self.clients = [(self.circles[0] if self.circles else {"id": "", "name": ""},
+                             client)]
+        else:
+            self.clients = []
+            for c in self.circles:
+                cc = ForumClient.from_config(
+                    self.cfg, circle_id=c["id"],
+                    allow_all=bool(self.cfg.get("forum_allow_all")) and not c["id"],
+                    transport=transport)
+                self.clients.append((c, cc))
+        self.client = self.clients[0][1] if self.clients else None
         self._last = []
         self._last_sync = None
         self._top_disabled = False           # 十大热帖要求登录时不再反复请求
         self.last_warning = ""
+        self.last_errors = []
 
     def fetch(self):
+        if not self.clients:
+            raise ForumError(self.circle_error or "没有可用的学校圈子")
+        # 只在「十大热帖已确认需登录」时跨轮保留提示，其余提示每轮重算，避免越积越长
+        self.last_warning = self.last_warning if self._top_disabled else ""
         # 可选省流量策略：new/num 探活，返回 0 且已有缓存时直接复用上一轮结果。
         # 依赖「time 上次刷新时间」的确切语义，确认后才把 forum_probe 打开。
-        if self.probe and self._last and self._last_sync:
+        if self.probe and self.client and self._last and self._last_sync:
             since = self._last_sync.strftime("%Y-%m-%d %H:%M:%S")
             try:
                 if self.client.new_count(since) <= 0:
@@ -388,28 +481,34 @@ class ForumAdapter:
                 pass                         # 探活失败不影响正常拉取
 
         errors, posts = [], []
-        size = self.page_size
-        if self._top_disabled:
-            size = self.fallback_size
-        else:
+        size = self.fallback_size if self._top_disabled else self.page_size
+        for circle, client in self.clients:
+            label = circle.get("name") or (circle.get("id") or "")[:10] or "全站"
+            got = []
+            if not self._top_disabled:
+                try:
+                    got.extend(client.top_ten())
+                except ForumAuthError as e:
+                    # 线上 ten/page 返回 code=110「请先登录」：降级为「最新帖按热度排序」，
+                    # 并记住本次会话不再请求，避免每个圈子都白打一次。
+                    self._top_disabled = True
+                    self.last_warning = "十大热帖需登录（%s），已改用最新帖按热度出榜" % e
+                    size = self.fallback_size
+                except ForumError as e:
+                    self.last_warning = "十大热帖不可用（%s），已改用最新帖按热度出榜" % e
+                    size = self.fallback_size
             try:
-                posts.extend(self.client.top_ten())
-            except ForumAuthError as e:
-                # 线上 ten/page 返回 code=110「请先登录」：降级为「最新帖按热度排序」，
-                # 并记住本次会话不再请求，避免每次刷新都白打一次。
-                self._top_disabled = True
-                self.last_warning = "十大热帖需登录（%s），已改用最新帖按热度出榜" % e
-                size = self.fallback_size
+                got.extend(client.latest(page_size=size))
             except ForumError as e:
-                self.last_warning = "十大热帖不可用（%s），已改用最新帖按热度出榜" % e
-                size = self.fallback_size
+                errors.append("%s：%s" % (label, e))
+            posts.extend(_tag_posts_with_circle(got, circle, self.tag_circle, self.multi))
 
-        try:
-            posts.extend(self.client.latest(page_size=size))
-        except ForumError as e:
-            errors.append("最新帖子：%s" % e)
+        self.last_errors = errors
+        if errors:
+            extra = "部分学校未取到：" + "；".join(errors[:3])
+            self.last_warning = (self.last_warning + "；" + extra) if self.last_warning else extra
         if not posts:
-            # 两个接口都失败：有旧数据就沿用，避免热帖榜被清空；否则才报错。
+            # 所有圈子都失败：有旧数据就沿用，避免热帖榜被清空；否则才报错。
             if self._last:
                 return list(self._last)
             raise ForumError("；".join(errors)[:80] or "没有取到帖子")
@@ -453,7 +552,7 @@ def _selftest():
                    "详情看图，欢迎大家来拼单，人数够了就一起下单，晚上九点截止报名啦  ",
         "userName": "图书馆钉子户", "createTime": "2026-11-10 13:04:24",
         "tagList": [{"name": "宣传推广", "type": "dynamic"}],
-        "circleTitle": "某大学", "circleId": "1844924022131912706",
+        "circleTitle": "某大学", "circleId": "CIRCLE_1",
         "heatNum": 50, "totalHeatNum": 96, "zanNum": 2,
         "commentsNum": 5, "browseNum": 34, "pics": "a.jpg,b.jpg",
         "type": "dynamic",
@@ -636,6 +735,95 @@ def _selftest():
     a2 = ForumAdapter({}, client=fail_client, fallback=Fallback())
     a2._last = [{"id": "old", "title": "缓存"}]
     check("接口全挂时沿用上一轮结果", a2.fetch()[0]["id"] == "old")
+
+    print("7) 多学校圈子")
+    two = [{"id": "CIRCLE_A", "name": "甲校"}, {"id": "CIRCLE_B", "name": "乙校"}]
+    parsed, err = normalize_circles({"forum_circles": two})
+    check("数组解析出 2 个圈子且无错误", len(parsed) == 2 and not err)
+    dup, _ = normalize_circles({"forum_circles": two + [{"id": "CIRCLE_A", "name": "重复"}]})
+    check("重复 ID 去重保序", len(dup) == 2 and dup[0]["name"] == "甲校")
+    legacy, _ = normalize_circles({"forum_circle_id": "OLD_ONE"})
+    check("旧单值 forum_circle_id 仍兼容", legacy == [{"id": "OLD_ONE", "name": ""}])
+    empty, msg = normalize_circles({})
+    check("未配圈子时给出引导而不是崩溃", not empty and "forum_circle_id" in msg)
+    many, _ = normalize_circles({"forum_circles": [
+        {"id": "C%d" % i, "name": "校%d" % i} for i in range(25)]})
+    check("圈子数上限 %d" % MAX_CIRCLES, len(many) == MAX_CIRCLES)
+
+    calls = []
+
+    def multi_net(u, h):
+        calls.append(u)
+        if "ten/page" in u:
+            return {"code": 110, "message": "请先登录", "data": None}
+        if "circleId=CIRCLE_A" in u:
+            return {"code": 200, "data": [
+                {"id": "A1", "content": "甲校热帖", "totalHeatNum": 90,
+                 "userName": "甲", "createTime": "2026-11-10 20:00:00",
+                 "tagList": [{"name": "活动"}]},
+                {"id": "SHARED", "content": "跨圈重复帖", "totalHeatNum": 10}]}
+        return {"code": 200, "data": [
+            {"id": "B1", "content": "乙校新帖", "totalHeatNum": 70,
+             "userName": "乙", "createTime": "2026-11-10 20:01:00",
+             "tagList": [{"name": "二手"}]},
+            {"id": "SHARED", "content": "跨圈重复帖", "totalHeatNum": 10}]}
+
+    multi_cfg = {"forum_base": "https://forum.example.com",
+                 "forum_circles": two, "forum_page_size": 10,
+                 "forum_top_fallback_size": 20, "forum_probe": False}
+    am = ForumAdapter(multi_cfg, transport=multi_net)
+    out_m = am.fetch()
+    check("多圈子合并后各校帖子都在", {"A1", "B1", "SHARED"} <=
+          {p["id"] for p in out_m}, str([p["id"] for p in out_m]))
+    check("跨圈重复 id 只留一条", len(out_m) == 3)
+    by_id = {p["id"]: p for p in out_m}
+    check("多圈子标签带学校简称", by_id["A1"]["tag"] == "甲校·活动"
+          and by_id["B1"]["tag"] == "乙校·二手", str([p["tag"] for p in out_m]))
+    check("仍是 7 字段（上层零改动）",
+          all(set(p) == {"id", "title", "author", "tag", "heat", "time", "url"}
+              for p in out_m))
+    check("每个圈子各带自己的 circleId",
+          any("circleId=CIRCLE_A" in u for u in calls)
+          and any("circleId=CIRCLE_B" in u for u in calls))
+    check("需登录的榜单只试一次", sum("ten/page" in u for u in calls) == 1)
+    check("降级后两个圈子都扩大取样",
+          sum("pageSize=20" in u for u in calls) == 2)
+    single_out = ForumAdapter(dict(multi_cfg, forum_circles=[two[0]]),
+                              transport=multi_net).fetch()
+    check("单圈子不加学校前缀", all("甲校" not in p["tag"] for p in single_out))
+
+    def one_down(u, h):
+        if "ten/page" in u:
+            return {"code": 110, "message": "请先登录", "data": None}
+        if "circleId=CIRCLE_B" in u:
+            raise ForumError("乙校连不上")
+        return {"code": 200, "data": [{"id": "A1", "content": "甲校正常",
+                                      "totalHeatNum": 55}]}
+
+    ad = ForumAdapter(multi_cfg, transport=one_down)
+    partial = ad.fetch()
+    check("一个学校挂了不影响另一个", len(partial) == 1 and partial[0]["id"] == "A1")
+    check("失败学校给出可读提示", "乙校" in ad.last_warning, ad.last_warning)
+
+    ad_all_down = ForumAdapter(multi_cfg,
+                               transport=lambda u, h: (_ for _ in ())
+                               .throw(ForumError("全挂")))
+    ad_all_down._last = [{"id": "cache", "title": "缓存"}]
+    check("所有学校都挂时沿用上一轮结果", ad_all_down.fetch()[0]["id"] == "cache")
+
+    def circle_mix(u, h):
+        return {"code": 200, "data": [
+            {"id": "A1", "content": "本校帖子", "circleId": "CIRCLE_A"},
+            {"id": "X1", "content": "别校串进来的帖子", "circleId": "CIRCLE_OTHER"},
+            {"id": "A2", "content": "没带圈子字段的帖子"}]}
+
+    cf = ForumClient("https://forum.example.com", circle_id="CIRCLE_A",
+                     transport=circle_mix)
+    ids = [p["id"] for p in cf.latest()]
+    check("填错/回落全站时串校数据被挡住", ids == ["A1", "A2"], str(ids))
+    ca = ForumClient("https://forum.example.com", circle_id="", allow_all=True,
+                     transport=circle_mix)
+    check("全站模式不做圈子过滤", len(ca.latest()) == 3)
 
     print("\nSELFTEST_OK %d 项通过" % ok)
 
