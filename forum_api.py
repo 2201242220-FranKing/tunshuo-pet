@@ -30,7 +30,7 @@
 帖子真实字段 → 桌宠 7 字段：
 
   id          <- id（19 位字符串；dynamicNo 是短编号，仅兜底）
-  title       <- content 正文摘要（真实数据没有 title 字段，取首 38 字）
+  title       <- content 正文摘要（真实数据没有 title 字段，取首 24 字，避免榜单行过高）
   author      <- userName
   tag         <- tagList[0].name，兜底 circleTitle
   heat        <- totalHeatNum，兜底 heatNum / zanNum / commentsNum / browseNum
@@ -81,7 +81,7 @@ SCHEMA = {
     "number": ("num", "count", "newNum", "newCount", "unread", "unreadNum"),
     "total": ("recordsTotal", "total", "totalCount", "totalSize"),
     "encrypt": ("encrypt", "isEncrypt", "encrypted"),
-    "title_max": 38,
+    "title_max": 24,
     "post": {
         "id": ("id", "dynamicId", "postId", "dynamicNo", "编号"),
         "title": ("title", "dynamicTitle", "subject", "name"),
@@ -131,12 +131,12 @@ def _safe_url(v):
     return v if isinstance(v, str) and v.startswith(("http://", "https://")) else None
 
 
-def _summarize(text, limit=38):
+def _summarize(text, limit=24):
     """真实帖子没有标题字段，用正文首句做气泡标题：去链接、并空白、话题转方括号。"""
     s = re.sub(r"https?://\S+", "", str(text or ""))
     s = re.sub(r"\s+", " ", s).strip()
     s = re.sub(r"^#([^#]{1,20})#\s*", r"[\1] ", s)
-    limit = max(8, min(120, _as_number(limit, 38)))
+    limit = max(8, min(120, _as_number(limit, 24)))
     if len(s) > limit:
         s = s[:limit - 1] + "…"
     return s or "(无标题动态)"
@@ -193,7 +193,7 @@ def _unwrap(raw, schema):
 def _normalize_posts(items, schema, detail_url_tpl=""):
     """映射成桌宠现有 7 字段：id/title/author/tag/heat/time/url。"""
     f = schema["post"]
-    limit = schema.get("title_max", 38)
+    limit = schema.get("title_max", 24)
     out = []
     for i, p in enumerate(items[:100]):
         if not isinstance(p, dict):
@@ -468,8 +468,11 @@ def _selftest():
     check("data 是数组时解析出 1 条", len(posts) == 1)
     check("7 字段齐全", set(p) == {"id", "title", "author", "tag", "heat", "time", "url"})
     check("id 用长 id 而非短编号", p["id"] == "2120019718319501314")
-    check("正文生成短标题（不是整段 97 字）", len(p["title"]) <= 38
+    check("正文生成短标题（不是整段 97 字）", len(p["title"]) <= SCHEMA["title_max"]
           and "https" not in p["title"], p["title"])
+    check("摘要长度可由 title_max / forum_schema 调整",
+          len(client(lambda u, h: real,
+                     schema=dict(SCHEMA, title_max=12)).latest()[0]["title"]) <= 12)
     check("话题转为方括号前缀", p["title"].startswith("[校园趣事]"), p["title"])
     check("作者 userName 映射", p["author"] == "图书馆钉子户")
     check("标签取 tagList[0].name", p["tag"] == "宣传推广")

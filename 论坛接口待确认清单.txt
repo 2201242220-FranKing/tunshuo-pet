@@ -1,0 +1,55 @@
+【豚说桌宠 · 论坛接口待确认清单】2026-11-10 更新版
+（基于真实联调结果，上一版里已经确认的项这次删掉了）
+
+
+一、已经实测通过，不用再提供示例
+- GET https://alumni.qiyuanheshan.com/app/dynamic/page
+  参数 pageNum / pageSize / type=dynamic / circleId 均正常，匿名可读。
+  响应外层：{"code":200, "data":[帖子数组], "recordsTotal":总数,
+             "message":"请求成功", "encrypt":false, "exception":null}
+  带 circleId 时按学校圈子筛选生效（recordsTotal 从全站 113504 变为该圈子 7614）。
+- GET /app/dynamic/detail?id=帖子ID 匿名可读，返回 41 个字段。
+- 帖子字段我们已按真实数据接好：id / content 正文 / userName / tagList[0].name /
+  createTime / totalHeatNum 热度 / circleTitle / pics / type 等。
+
+
+二、仍需确认（按优先级）
+
+1. 学校圈子 circleId 的实际值
+   桌宠需要写死一个学校 ID 才能只播本校帖子。请给豚说主圈子的 circleId，
+   或说明小程序首页「当前用户 circleId」从哪里能查到（例如某个接口返回）。
+   不传该参数时接口会返回全站数据，我们不想默认这么做。
+
+2. 十大热帖、新帖数接口需要登录态（最关键）
+   GET /app/dynamic/ten/page?circleId=...
+   GET /app/dynamic/new/num?circleId=...&time=...&type=dynamic
+   两者都返回 {"code":110, "message":"请先登录", "data":null}。
+   请二选一：
+   a) 提供匿名只读入口（推荐。桌宠是本地常驻程序，不希望长期保存用户登录态）；
+   b) 说明 token 的获取方式、放在哪个 Header、有效期与刷新方式。
+   在确认前，桌宠会自动降级为「最新帖按 totalHeatNum 降序出榜」，
+   新帖播报不受影响，只是拿不到全站十大。
+
+3. 站内信 / 未读消息的正确路径
+   上一版文档里「十大热帖」和「站内信 提醒未读消息」写成了同一个
+   GET /app/dynamic/ten/page?circleId=，疑似复制粘贴漏改。
+   请给正确路径、参数与返回字段（未读数是纯数字还是对象、字段名）。
+   桌宠目前没有站内信角标 UI，确认后再评估要不要做。
+
+4. 打开原帖的 H5 链接规则
+   帖子接口没有返回任何 url 字段，桌宠双击热帖榜现在无法跳转。
+   请给拼接模板，例如 https://xxx/h5/dynamic/detail?id={id}；
+   若没有网页版，请说明，我们改成客户端内弹详情（用 /app/dynamic/detail）。
+
+5. 次要项（有空再给，不阻塞）
+   - /app/dynamic/new/num 的 time 语义：时区、按 createTime 还是 updateTime 比较、
+     首次拉取传什么、返回纯数字还是对象。
+   - tagId 的枚举从哪个接口拿。
+   - pageSize 上限与限频；桌宠默认不自动轮询，手动刷新约 3 分钟一次，
+     每次最多拉 20 条。
+
+
+三、我们这边的约定
+- 令牌只从环境变量临时读取，绝不写进会入库的配置文件。
+- 自动轮询默认关闭，接好接口后仍先由用户手动点「立即刷新」。
+- 若接口字段变动，只需改字段映射表，不需要改桌宠逻辑。

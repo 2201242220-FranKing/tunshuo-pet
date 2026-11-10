@@ -119,7 +119,7 @@ python3 make_app.py
 | 桌宠字段 | 取自 | 说明 |
 |---|---|---|
 | `id` | `id` | 19 位字符串；`dynamicNo` 短编号只作兜底 |
-| `title` | `content` | 真实帖子没有标题字段，取正文首 38 字做摘要（去链接、并空白、`#话题#` 转方括号） |
+| `title` | `content` | 真实帖子没有标题字段，取正文首 24 字做摘要（去链接、并空白、`#话题#` 转方括号）。上限由 `forum_api.SCHEMA["title_max"]` 控制，也可用 `forum_schema` 覆盖；定在 24 字是因为 38 字会让热帖榜每条高达 110px 以上 |
 | `author` | `userName` | |
 | `tag` | `tagList[0].name` | 兜底 `circleTitle` 圈子名 |
 | `heat` | `totalHeatNum` | 兜底 `heatNum` / `zanNum` / `commentsNum` / `browseNum` |
@@ -145,14 +145,23 @@ python3 make_app.py
 **自检命令**（都不写任何配置）：
 
 ```bash
-python3 forum_api.py --selftest                          # 48 项离线自测，不发网络请求
+python3 forum_api.py --selftest                          # 49 项离线自测，不发网络请求
 python3 forum_api.py --live --circle-id <学校圈子ID>     # 真实只读联调，作者自动打码
 python3 forum_api.py --live --all                        # 不带圈子 ID，拉全站（仅验证用）
 ```
 
-**启用三步**：在 `config.json` 填 `forum_base` 与 `forum_circle_id` → 重启桌宠 → 右键「立即刷新」。首次刷新只建立基线不误报新帖。若要定时播报，再把 `auto_poll` 设为 `true`（轮询条件已兼容 `api_url` 或 `forum_base` 任一配好）；当前按用户要求保持关闭。
+**启用（用 `enable_forum.py`，默认只预览不写盘）**：
 
-**仍需技术确认**：学校 `circleId` 实际值、原帖 H5 链接规则、`new/num` 的 `time` 语义与 `tagId` 枚举、站内信未读的正确路径。技术文档里「十大热帖」和「站内信 提醒未读消息」写成了同一个 `GET /app/dynamic/ten/page?circleId=`，疑似笔误；`ForumClient.unread()` 已保留但默认抛明确错误，路径确认后改 `UNREAD_PATH` 即可，站内信角标属于新 UI，尚未实现。
+```bash
+python3 enable_forum.py --status                          # 看当前是否启用
+python3 enable_forum.py --circle-id <学校圈子ID>          # 预览改动 + 只读联调
+python3 enable_forum.py --circle-id <学校圈子ID> --apply  # 确认后才写 config.json
+python3 enable_forum.py --off --apply                     # 一键回退到演示数据
+```
+
+脚本只改 `forum_base` / `forum_circle_id` / `forum_allow_all` 三个键，其余配置原样保留，**令牌永远不写盘**；也不会替你重启桌宠。写入后退出并重启 `.app` → 右键「立即刷新」，首次刷新只建立基线不误报新帖。若要定时播报，再单独把 `auto_poll` 设为 `true`（轮询条件已兼容 `api_url` 或 `forum_base` 任一配好）；当前按用户要求保持关闭。
+
+**仍需技术确认**：学校 `circleId` 实际值、十大热帖/新帖数需登录（返回 `code=110 请先登录`）、原帖 H5 链接规则、`new/num` 的 `time` 语义与 `tagId` 枚举、站内信未读的正确路径。可直接转发 `论坛接口待确认清单.txt`（已标注哪些项实测通过、不用重复给）。技术文档里「十大热帖」和「站内信 提醒未读消息」写成了同一个 `GET /app/dynamic/ten/page?circleId=`，疑似笔误；`ForumClient.unread()` 已保留但默认抛明确错误，路径确认后改 `UNREAD_PATH` 即可，站内信角标属于新 UI，尚未实现。
 
 ## 交互一览
 
@@ -177,6 +186,8 @@ tunshuo-pet/
 ├── action_engine.py       动作解释器：数据校验 / 缓动插值 / 部件通道
 ├── skin_rig.py            皮肤 manifest 校验、父子变换链、z 序、包围盒
 ├── forum_api.py           论坛 REST 适配层（真实字段已校准，默认不启用，可离线/联网自检）
+├── enable_forum.py        论坛接口一键启用/回退（默认只预览，--apply 才写配置）
+├── 论坛接口待确认清单.txt   可直接转发技术的追问清单（含已实测通过的项）
 ├── make_app.py            macOS .app 打包脚本
 ├── config.json            用户配置（入库）
 ├── state.json             运行时状态（自动生成，不入库）
