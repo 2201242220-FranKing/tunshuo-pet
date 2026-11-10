@@ -63,12 +63,14 @@ DEFAULT_CONFIG = {
 
     # 论坛真实接口适配层（见 forum_api.py）：全部留空 = 完全不启用，继续用演示数据。
     # 令牌只从环境变量 TUNSHUO_FORUM_TOKEN 读，绝不写进这份会入库的配置。
-    "forum_base": "",                      # API 根地址，留空即不启用
-    "forum_circle_id": "",                 # 圈子 ID，待技术确认
+    "forum_base": "",                      # 留空即不启用；启用填 https://alumni.qiyuanheshan.com
+    "forum_circle_id": "",                 # 学校圈子 circleId（小程序首页带的值）
+    "forum_allow_all": False,              # True = 不传 circleId 拉全站，一般不建议
     "forum_token_header": "Authorization",
-    "forum_detail_url": "",                # 原帖 H5 链接模板，{id} 占位
-    "forum_probe": False,                  # new/num 探活，time 语义确认后再开
+    "forum_detail_url": "",                # 原帖 H5 链接模板，{id} 占位，待技术给规则
+    "forum_probe": False,                  # new/num 需登录且 time 语义未定，保持关闭
     "forum_page_size": 10,
+    "forum_top_fallback_size": 20,         # 十大热帖不可用时扩大取样条数
     "forum_schema": None,                  # 可选：覆盖 forum_api.SCHEMA 字段映射
 }
 

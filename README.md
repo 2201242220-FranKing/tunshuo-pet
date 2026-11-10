@@ -68,7 +68,7 @@ python3 make_app.py
 | `notify_system` | `true` | 有新帖时是否发 macOS 系统通知。**工作台发布过形象后由工作台的「新帖系统通知」接管** |
 | `pet_width` | `60` | 角色逻辑宽度（px）；素材 240px 通过 DPR=4 显示 |
 | `idle_sleep_seconds` | `180` | 无操作多久自动睡着，`0` 表示永不。**工作台发布过形象后由工作台的「自动睡觉」接管** |
-| `auto_poll` | `false` | 是否定时拉新帖。**仅在 `api_url` 非空时生效**；演示数据模式下不会启动，避免假数据反复弹提醒 |
+| `auto_poll` | `false` | 是否定时拉新帖。**仅在 `api_url` 或 `forum_base` 配好时生效**；演示数据模式下不会启动，避免假数据反复弹提醒 |
 | `poll_interval_minutes` | `3` | 轮询间隔（分钟，最小 1）。已有请求未结束时会自动跳过这一轮 |
 | `studio_url` | `http://127.0.0.1:8770` | 形象工作台地址；**留空 = 完全不联网同步**，只用本地缓存 |
 | `studio_sync_seconds` | `20` | 拉取形象配置的间隔（秒，最小 5）。与热帖轮询互相独立 |
@@ -101,27 +101,58 @@ python3 make_app.py
 
 `id` 缺省时用 `title` 去重；`heat` 允许数字或数字字符串，脏数据会降级为 0；`url` 只放行 `http://` / `https://`；一次最多取 100 条。
 
-### 论坛 REST 接口适配层（骨架，默认不启用）
+### 论坛 REST 接口适配层（已按真实响应校准，默认不启用）
 
-技术提供的是一组 REST 接口：`/app/dynamic/page` 最新帖子、`/app/dynamic/new/num` 新帖提醒数、`/app/dynamic/ten/page` 十大热帖、`/app/dynamic/detail` 帖子详情。**上面的 `api_url` 是旧的单接口约定，继续有效**；新接口走 `forum_api.py`，把多个接口聚合成同样的 7 字段列表，因此 `_on_posts()` 去重播报、`HotPanel` 排序渲染、双击打开链接全部零改动。
+线上地址 `https://alumni.qiyuanheshan.com`。技术提供的接口：`/app/dynamic/page` 最新帖子、`/app/dynamic/new/num` 新帖提醒数、`/app/dynamic/ten/page` 十大热帖、`/app/dynamic/detail` 帖子详情。**上面的 `api_url` 是旧的单接口约定，继续有效**；新接口走 `forum_api.py`，聚合成同样的 7 字段列表，因此 `_on_posts()` 去重播报、`HotPanel` 排序渲染、双击打开链接全部零改动。
+
+真实外层结构（已实测）：
+
+```json
+{"code": 200, "data": [ {"id": "...", "content": "...", "userName": "...",
+                         "tagList": [{"name": "宣传推广"}], "createTime": "...",
+                         "totalHeatNum": 96} ],
+ "encrypt": false, "message": "请求成功", "recordsTotal": 7614}
+```
+
+`data` **直接是帖子数组**（不是 `records`/`list` 包裹），`recordsTotal` 在顶层；`code=400` 参数错误，`code=110 / message=请先登录` 缺登录态。
+
+| 桌宠字段 | 取自 | 说明 |
+|---|---|---|
+| `id` | `id` | 19 位字符串；`dynamicNo` 短编号只作兜底 |
+| `title` | `content` | 真实帖子没有标题字段，取正文首 38 字做摘要（去链接、并空白、`#话题#` 转方括号） |
+| `author` | `userName` | |
+| `tag` | `tagList[0].name` | 兜底 `circleTitle` 圈子名 |
+| `heat` | `totalHeatNum` | 兜底 `heatNum` / `zanNum` / `commentsNum` / `browseNum` |
+| `time` | `createTime` | |
+| `url` | 接口未返回 | 等技术给 H5 规则后填 `forum_detail_url`；在此之前双击条目不会跳转 |
+
+**实测鉴权差异（重要）**：`page` 与 `detail` 匿名即可读；`ten/page` 与 `new/num` 返回 `code=110 请先登录`。因此默认不依赖这两个接口：十大热帖拿不到时自动改用最新帖按 `totalHeatNum` 出榜（上层本来就按 heat 排序），并把取样从 10 扩到 20，本次会话不再反复请求需登录的接口。**零令牌也能跑**；若技术提供匿名榜单或用环境变量临时给 token，榜单会自动切回真实十大。
 
 | config.json 字段 | 默认 | 说明 |
 |---|---|---|
-| `forum_base` | `""` | **唯一启用开关**。留空 → `make_source()` 原样返回旧 `DataSource`，继续用演示数据，零回归 |
-| `forum_circle_id` | `""` | 圈子 ID，待技术确认 |
+| `forum_base` | `""` | **唯一启用开关**。留空 → `make_source()` 原样返回旧 `DataSource`，继续用演示数据，零回归；启用填 `https://alumni.qiyuanheshan.com` |
+| `forum_circle_id` | `""` | 学校圈子 circleId（小程序首页带的值）。**不传时接口不按学校筛选**，所以未配置会明确报错 |
+| `forum_allow_all` | `false` | 设为 `true` 才允许不传 circleId 拉全站 |
 | `forum_token_header` | `Authorization` | 令牌字段名；**令牌值只从环境变量 `TUNSHUO_FORUM_TOKEN` 读，绝不写进会入库的 config.json** |
 | `forum_detail_url` | `""` | 原帖 H5 链接模板，用 `{id}` 占位；拼出的链接仍只放行 http(s) |
-| `forum_probe` | `false` | 用 `new/num` 轻量探活；依赖 `time` 参数语义，确认后再开 |
+| `forum_probe` | `false` | `new/num` 探活；需登录且 `time` 语义未定，保持关闭 |
 | `forum_page_size` | `10` | 每次拉最新帖子的条数（1~50） |
-| `forum_schema` | `null` | 可选：覆盖 `forum_api.SCHEMA` 的字段映射，技术给真实响应后只改这里 |
+| `forum_top_fallback_size` | `20` | 十大热帖不可用时扩大到的取样条数 |
+| `forum_schema` | `null` | 可选：覆盖 `forum_api.SCHEMA` 的字段映射，技术改字段时只改这里 |
 
 这些默认值只在 `DEFAULT_CONFIG` 里，**不会写回现有 config.json**（程序只在文件不存在时才创建它）。
 
-**当前状态：骨架已就绪、未启用。** `python3 forum_api.py --selftest` 用假响应跑 28 项离线自测（多种外层包裹、脏数据降级、链接白名单、合并去重、接口全挂时沿用上轮结果、令牌不落盘、默认不启用），不发任何网络请求。等技术补回 base URL、鉴权方式和 5 份真实响应示例后，只需改 `SCHEMA` 候选字段与 `UNREAD_PATH`。
+**自检命令**（都不写任何配置）：
 
-> ⚠️ 技术文档里「十大热帖」和「站内信 提醒未读消息」写成了同一个 `GET /app/dynamic/ten/page?circleId=`，疑似笔误。`ForumClient.unread()` 已保留但默认抛明确错误，路径确认后改 `UNREAD_PATH` 即可；站内信角标在桌宠里属于新 UI，尚未实现。
+```bash
+python3 forum_api.py --selftest                          # 48 项离线自测，不发网络请求
+python3 forum_api.py --live --circle-id <学校圈子ID>     # 真实只读联调，作者自动打码
+python3 forum_api.py --live --all                        # 不带圈子 ID，拉全站（仅验证用）
+```
 
-`auto_poll` 仍默认 `false`（按用户要求不自动轮询）：接口接好后右键「立即刷新」手动拉取；若要开启定时轮询，需同时把 `auto_poll` 设为 `true`，轮询条件已兼容 `api_url` 或 `forum_base` 任一配好。
+**启用三步**：在 `config.json` 填 `forum_base` 与 `forum_circle_id` → 重启桌宠 → 右键「立即刷新」。首次刷新只建立基线不误报新帖。若要定时播报，再把 `auto_poll` 设为 `true`（轮询条件已兼容 `api_url` 或 `forum_base` 任一配好）；当前按用户要求保持关闭。
+
+**仍需技术确认**：学校 `circleId` 实际值、原帖 H5 链接规则、`new/num` 的 `time` 语义与 `tagId` 枚举、站内信未读的正确路径。技术文档里「十大热帖」和「站内信 提醒未读消息」写成了同一个 `GET /app/dynamic/ten/page?circleId=`，疑似笔误；`ForumClient.unread()` 已保留但默认抛明确错误，路径确认后改 `UNREAD_PATH` 即可，站内信角标属于新 UI，尚未实现。
 
 ## 交互一览
 
@@ -145,7 +176,7 @@ tunshuo-pet/
 ├── actions.json           14 个出厂动作关键帧（桌宠离线默认，工作台发布可覆盖）
 ├── action_engine.py       动作解释器：数据校验 / 缓动插值 / 部件通道
 ├── skin_rig.py            皮肤 manifest 校验、父子变换链、z 序、包围盒
-├── forum_api.py           论坛 REST 接口适配层（骨架，默认不启用，可离线自测）
+├── forum_api.py           论坛 REST 适配层（真实字段已校准，默认不启用，可离线/联网自检）
 ├── make_app.py            macOS .app 打包脚本
 ├── config.json            用户配置（入库）
 ├── state.json             运行时状态（自动生成，不入库）
@@ -173,7 +204,7 @@ python3 assets/process_sprite.py
 ## 已知限制
 
 - 仅 macOS；Windows / Linux 上托盘通知、打包脚本与部分窗口属性不适用。
-- 默认使用演示数据；论坛真实接口的适配层骨架已就绪但**尚未启用**（`forum_base` 留空）。自动轮询按用户要求保持关闭，右键「立即刷新」手动拉取；技术补齐域名、鉴权与返回结构后才填配置。
+- 默认使用演示数据；论坛适配层已按真实响应校准且完整联调通过，但**尚未启用**（`forum_base` 留空）。自动轮询按用户要求保持关闭。启用还需要学校 `circleId`；十大热帖与新帖数接口需登录，当前会自动降级为「最新帖按热度出榜」，双击打开原帖待技术给 H5 链接规则。
 - 形象同步依赖 `tunshuo-pet-studio/` 的服务；工作台没运行时桌宠用本地缓存继续跑，不会报错，但新发布的形象要等服务起来（或手动「重新同步形象」）才生效。不想联网就把 `studio_url` 留空。
 - `assets/skins/placeholder/` 是**程序从现有 `pet.png` 切出来的技术验证包**，不是最终美术：小角度（头 ≤10°、手 ≤35°）没有破洞，角度再大会露出同色底补的月牙。正式皮肤请按 `tunshuo-pet-studio/JOINT_SPEC.md` 重画挖空底图与部件层，直接放进工作台替换即可，代码不用改。
 - 无边框透明窗口必须关掉系统投影（`Qt.NoDropShadowWindowHint`），否则动作播放、遮罩变矩形时，macOS 会在角色背后投出一块灰黑方块。
