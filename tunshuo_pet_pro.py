@@ -30,6 +30,12 @@ import studio_sync as ss
 import action_engine as ae
 import skin_rig as rig
 
+# 论坛真实接口适配层（默认不启用）。即使这个模块缺失也不影响演示数据模式启动。
+try:
+    import forum_api as fa
+except ImportError:                        # pragma: no cover
+    fa = None
+
 from PySide6.QtCore import (QAbstractAnimation, QEasingCurve, QPoint, QRectF,
                             QSize, Qt, QThread, QTimer, QVariantAnimation,
                             Signal)
@@ -54,6 +60,16 @@ DEFAULT_CONFIG = {
     "idle_sleep_seconds": 180,   # 无操作多久后自己睡着（0 = 永不）
     "studio_url": "http://127.0.0.1:8770",  # 形象工作台地址；留空 = 不联网同步
     "studio_sync_seconds": 20,              # 拉取间隔（秒），最小 5
+
+    # 论坛真实接口适配层（见 forum_api.py）：全部留空 = 完全不启用，继续用演示数据。
+    # 令牌只从环境变量 TUNSHUO_FORUM_TOKEN 读，绝不写进这份会入库的配置。
+    "forum_base": "",                      # API 根地址，留空即不启用
+    "forum_circle_id": "",                 # 圈子 ID，待技术确认
+    "forum_token_header": "Authorization",
+    "forum_detail_url": "",                # 原帖 H5 链接模板，{id} 占位
+    "forum_probe": False,                  # new/num 探活，time 语义确认后再开
+    "forum_page_size": 10,
+    "forum_schema": None,                  # 可选：覆盖 forum_api.SCHEMA 字段映射
 }
 
 # 只放「运行时状态」：每次互动都会写，不入库。
@@ -351,9 +367,12 @@ class PetWindow(QWidget):
 
         # 自动轮询：默认关闭；接了真实接口后把 auto_poll 打开即可按分钟拉新帖。
         # 演示数据模式下不启动，避免每几分钟用假数据弹一次提醒。
+        # api_url（旧单接口）或 forum_base（新适配层）任一配好即可启用。
         self.poll_timer = QTimer(self)
         self.poll_timer.timeout.connect(self.refresh)
-        if cfg.get("auto_poll") and str(cfg.get("api_url") or "").strip():
+        has_source = (str(cfg.get("api_url") or "").strip()
+                      or str(cfg.get("forum_base") or "").strip())
+        if cfg.get("auto_poll") and has_source:
             try:
                 minutes = max(1, int(cfg.get("poll_interval_minutes") or 3))
             except (TypeError, ValueError):
@@ -1452,7 +1471,10 @@ def main():
     app.setQuitOnLastWindowClosed(False)
     cfg = load_config()
     state = load_state(cfg)
-    pet = PetWindow(cfg, DataSource(cfg), state)
+    source = DataSource(cfg)
+    if fa is not None:
+        source = fa.make_source(cfg, source)   # 没填 forum_base 时原样返回
+    pet = PetWindow(cfg, source, state)
     pet.show()
 
     tray = QSystemTrayIcon(QIcon(QPixmap(os.path.join(ASSET_DIR, "pet.png"))))

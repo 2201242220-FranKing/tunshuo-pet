@@ -12,7 +12,7 @@
 - **事件状态机**：来新帖 → 抬手播报（`announce`）、被拖动 → 手脚挣扎（`struggle`）、点击摸头 → 歪头（`nuzzle`）、待机 → 呼吸（`breathe`）；找不到对应触发动作时自动回落到原有逻辑。
 - **待机随机动作**：每隔 4.5~11 秒随机播一个动作，另有随机眨眼、呼吸浮动。
 - **拖动倾斜**：按最近 100ms 的平均速度计算倾斜角，慢拖也有明显反应，甩到 1200px/s 吃满 30°；松手有边缘吸附和回弹余震。
-- **热帖播报**：内置演示数据；填入 `api_url` 后可切到真实论坛接口。首次刷新只建立基线、不误报新帖；打开 `auto_poll` 后按分钟定时拉取。
+- **热帖播报**：内置演示数据；填入 `api_url`（旧单接口）或配置 `forum_base`（新 REST 适配层）后可切到真实论坛接口。首次刷新只建立基线、不误报新帖；打开 `auto_poll` 后按分钟定时拉取。
 - **状态**：连点 5 次跳舞、右键喂小鱼干、180 秒无操作自动睡觉（zzz），点击唤醒。
 - **按需调帧**：动作/拖动 16.7fps、静止 6.7fps、睡觉 3.3fps；呼吸、倾斜、动作都按真实时间计算，降帧不会让动画变慢，长时间常驻更省电。
 - **形象工作台**：配套网站 `tunshuo-pet-studio/` 可以可视化改外观、动作、台词、配饰，上传并切换整套皮肤包；发布后桌宠自动同步，皮肤素材下载到 `assets/skins/`。配饰画在角色的同一个变换里，跳起/倾斜时不会飘掉；`attach` 字段还能把帽子挂到头部、围巾挂到身体。断网时沿用上一次的形象。
@@ -101,6 +101,28 @@ python3 make_app.py
 
 `id` 缺省时用 `title` 去重；`heat` 允许数字或数字字符串，脏数据会降级为 0；`url` 只放行 `http://` / `https://`；一次最多取 100 条。
 
+### 论坛 REST 接口适配层（骨架，默认不启用）
+
+技术提供的是一组 REST 接口：`/app/dynamic/page` 最新帖子、`/app/dynamic/new/num` 新帖提醒数、`/app/dynamic/ten/page` 十大热帖、`/app/dynamic/detail` 帖子详情。**上面的 `api_url` 是旧的单接口约定，继续有效**；新接口走 `forum_api.py`，把多个接口聚合成同样的 7 字段列表，因此 `_on_posts()` 去重播报、`HotPanel` 排序渲染、双击打开链接全部零改动。
+
+| config.json 字段 | 默认 | 说明 |
+|---|---|---|
+| `forum_base` | `""` | **唯一启用开关**。留空 → `make_source()` 原样返回旧 `DataSource`，继续用演示数据，零回归 |
+| `forum_circle_id` | `""` | 圈子 ID，待技术确认 |
+| `forum_token_header` | `Authorization` | 令牌字段名；**令牌值只从环境变量 `TUNSHUO_FORUM_TOKEN` 读，绝不写进会入库的 config.json** |
+| `forum_detail_url` | `""` | 原帖 H5 链接模板，用 `{id}` 占位；拼出的链接仍只放行 http(s) |
+| `forum_probe` | `false` | 用 `new/num` 轻量探活；依赖 `time` 参数语义，确认后再开 |
+| `forum_page_size` | `10` | 每次拉最新帖子的条数（1~50） |
+| `forum_schema` | `null` | 可选：覆盖 `forum_api.SCHEMA` 的字段映射，技术给真实响应后只改这里 |
+
+这些默认值只在 `DEFAULT_CONFIG` 里，**不会写回现有 config.json**（程序只在文件不存在时才创建它）。
+
+**当前状态：骨架已就绪、未启用。** `python3 forum_api.py --selftest` 用假响应跑 28 项离线自测（多种外层包裹、脏数据降级、链接白名单、合并去重、接口全挂时沿用上轮结果、令牌不落盘、默认不启用），不发任何网络请求。等技术补回 base URL、鉴权方式和 5 份真实响应示例后，只需改 `SCHEMA` 候选字段与 `UNREAD_PATH`。
+
+> ⚠️ 技术文档里「十大热帖」和「站内信 提醒未读消息」写成了同一个 `GET /app/dynamic/ten/page?circleId=`，疑似笔误。`ForumClient.unread()` 已保留但默认抛明确错误，路径确认后改 `UNREAD_PATH` 即可；站内信角标在桌宠里属于新 UI，尚未实现。
+
+`auto_poll` 仍默认 `false`（按用户要求不自动轮询）：接口接好后右键「立即刷新」手动拉取；若要开启定时轮询，需同时把 `auto_poll` 设为 `true`，轮询条件已兼容 `api_url` 或 `forum_base` 任一配好。
+
 ## 交互一览
 
 | 操作 | 效果 |
@@ -123,6 +145,7 @@ tunshuo-pet/
 ├── actions.json           14 个出厂动作关键帧（桌宠离线默认，工作台发布可覆盖）
 ├── action_engine.py       动作解释器：数据校验 / 缓动插值 / 部件通道
 ├── skin_rig.py            皮肤 manifest 校验、父子变换链、z 序、包围盒
+├── forum_api.py           论坛 REST 接口适配层（骨架，默认不启用，可离线自测）
 ├── make_app.py            macOS .app 打包脚本
 ├── config.json            用户配置（入库）
 ├── state.json             运行时状态（自动生成，不入库）
@@ -150,7 +173,7 @@ python3 assets/process_sprite.py
 ## 已知限制
 
 - 仅 macOS；Windows / Linux 上托盘通知、打包脚本与部分窗口属性不适用。
-- 默认使用演示数据，尚未接真实论坛接口；自动轮询默认关闭，接好接口后需在 `config.json` 里把 `auto_poll` 设为 `true`。
+- 默认使用演示数据；论坛真实接口的适配层骨架已就绪但**尚未启用**（`forum_base` 留空）。自动轮询按用户要求保持关闭，右键「立即刷新」手动拉取；技术补齐域名、鉴权与返回结构后才填配置。
 - 形象同步依赖 `tunshuo-pet-studio/` 的服务；工作台没运行时桌宠用本地缓存继续跑，不会报错，但新发布的形象要等服务起来（或手动「重新同步形象」）才生效。不想联网就把 `studio_url` 留空。
 - `assets/skins/placeholder/` 是**程序从现有 `pet.png` 切出来的技术验证包**，不是最终美术：小角度（头 ≤10°、手 ≤35°）没有破洞，角度再大会露出同色底补的月牙。正式皮肤请按 `tunshuo-pet-studio/JOINT_SPEC.md` 重画挖空底图与部件层，直接放进工作台替换即可，代码不用改。
 - 无边框透明窗口必须关掉系统投影（`Qt.NoDropShadowWindowHint`），否则动作播放、遮罩变矩形时，macOS 会在角色背后投出一块灰黑方块。
