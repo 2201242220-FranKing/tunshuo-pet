@@ -17,6 +17,7 @@ v4 关键改动：
   · 自动睡觉时长      → config.json 的 idle_sleep_seconds
 """
 
+import datetime as _dt
 import json
 import math
 import os
@@ -113,6 +114,55 @@ PHRASES = [
     "要不要看看闲置区？说不定有惊喜",
     "校园卡这周的优惠我帮你盯着呢",
 ]
+
+# 最新 / 最热 两个分段按钮的样式（只改外观，不动数据层）
+TAB_ON = ("QPushButton{background:#DCEBFB;color:#2C6BA8;border:none;border-radius:8px;"
+          "font-size:12px;} QPushButton:hover{background:#D2E6FA;}")
+TAB_OFF = ("QPushButton{background:#F2F6FB;color:#8FA6BE;border:none;border-radius:8px;"
+           "font-size:12px;} QPushButton:hover{background:#E8F2FC;color:#3C6E9F;}")
+
+# ----------------------------------------------------------------------
+# 帖子时间：真实接口是 "2026-11-10 13:04:24"，演示数据 / 旧 api_url 约定是
+# 「5分钟前」这类相对串。排序只认能解析成绝对时间的，解析不了的统一排到最后，
+# 并借 sorted 的稳定性保持拉取顺序，演示数据模式下不会乱跳。
+# ----------------------------------------------------------------------
+_TIME_FORMATS = ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d",
+                 "%Y/%m/%d %H:%M:%S", "%Y/%m/%d %H:%M", "%Y/%m/%d")
+
+
+def _parse_post_time(value):
+    """把 time 字段解析成 naive datetime；相对时间 / 空值返回 None。"""
+    s = str(value or "").strip()
+    if not s:
+        return None
+    try:
+        dt = _dt.datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except ValueError:
+        dt = None
+        for fmt in _TIME_FORMATS:
+            try:
+                dt = _dt.datetime.strptime(s, fmt)
+                break
+            except ValueError:
+                continue
+    if dt is not None and dt.tzinfo is not None:
+        # 带时区的先换成本地墙上时间再剥 tzinfo，避免 naive / aware 混比报错
+        dt = dt.astimezone().replace(tzinfo=None)
+    return dt
+
+
+def post_time_key(value):
+    """排序键：规整成定长字符串，字典序降序即时间降序；解析不了返回 ""。"""
+    dt = _parse_post_time(value)
+    return dt.strftime("%Y-%m-%d %H:%M:%S") if dt else ""
+
+
+def short_post_time(value):
+    """展示用：绝对时间压成「11-10 13:04」，相对串原样保留。"""
+    dt = _parse_post_time(value)
+    if dt:
+        return dt.strftime("%m-%d %H:%M")
+    return str(value or "").strip()[:12]
 
 
 # ======================================================================
@@ -1061,8 +1111,11 @@ class PetWindow(QWidget):
         if not pat:
             self.play("shake")
         if self.posts and random.random() < 0.55:
-            top = max(self.posts, key=lambda x: x["heat"])
-            self.say("现在最火的是：\n「%s」\n热度 %d" % (top["title"][:18], top["heat"]))
+            # 与榜单「最新」、新帖播报统一口径：按发布时间取最新的一条
+            top = max(self.posts, key=lambda p: post_time_key(p.get("time")))
+            when = short_post_time(top.get("time")) or "刚刚"
+            self.say("最新的一条是：\n「%s」\n%s · %s"
+                     % (top["title"][:18], top["author"], when))
         else:
             self.say(random.choice(self.studio["settings"]["phrases"]))
 
@@ -1273,14 +1326,17 @@ class PetWindow(QWidget):
             return
 
         if new and not self.paused:
-            top = max(new, key=lambda x: x["heat"])
+            # 播报新帖里发布时间最新的那条（原为热度最高）；时间解析不了时
+            # post_time_key 统一返回 ""，max 落到拉取顺序第一条，不会乱跳。
+            top = max(new, key=lambda p: post_time_key(p.get("time")))
             self.sleeping = False
             # 关节皮肤下改成「抬手播报」，整图模式仍走原来的蹦一下
             if not self.on_event("newpost"):
                 self.play("hop")
-            self.say("有新帖！\n「%s」\n%s · 热度 %d"
-                     % (top["title"][:18], top["author"], top["heat"]), 6800)
-            self._notify("豚说小豚", "新帖：%s（热度 %d）" % (top["title"][:22], top["heat"]))
+            when = short_post_time(top.get("time")) or "刚刚"
+            self.say("有新帖！\n「%s」\n%s · %s"
+                     % (top["title"][:18], top["author"], when), 6800)
+            self._notify("豚说小豚", "新帖：%s（%s）" % (top["title"][:22], when))
         if self.panel.isVisible():
             self.panel.set_posts(posts)
 
@@ -1307,17 +1363,20 @@ class HotPanel(QWidget):
         self.setAttribute(Qt.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WA_MacAlwaysShowToolWindow, True)
         self.pet = pet
-        self.resize(336, 406)
+        self.resize(336, 440)          # 多了切换行，给列表补回等高的可视区域
+        self.mode = "hot"              # 默认沿用旧行为：按热度出榜，零回归
+        self.raw_posts = []            # 原始批次，切换时只重排、不重新拉数据
+        self.posts = []
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(15, 13, 15, 15)
         lay.setSpacing(8)
 
         head = QHBoxLayout()
-        t = QLabel("豚说 · 热帖榜")
-        t.setFont(QFont("PingFang SC", 13, QFont.DemiBold))
-        t.setStyleSheet("color:#2C4258;")
-        head.addWidget(t)
+        self.title = QLabel("豚说 · 热帖榜")
+        self.title.setFont(QFont("PingFang SC", 13, QFont.DemiBold))
+        self.title.setStyleSheet("color:#2C4258;")
+        head.addWidget(self.title)
         head.addStretch(1)
         btn = QPushButton("刷新")
         btn.setCursor(Qt.PointingHandCursor)
@@ -1335,6 +1394,22 @@ class HotPanel(QWidget):
         head.addWidget(close)
         lay.addLayout(head)
 
+        # 最新 / 最热 分段切换：只换排序，不触发 refresh（不产生额外网络请求）
+        tabs = QHBoxLayout()
+        tabs.setSpacing(6)
+        self.tab_new = QPushButton("最新")
+        self.tab_hot = QPushButton("最热")
+        for b in (self.tab_new, self.tab_hot):
+            b.setCursor(Qt.PointingHandCursor)
+            b.setFixedSize(58, 26)
+            b.setCheckable(True)
+        self.tab_new.clicked.connect(lambda: self.set_mode("new"))
+        self.tab_hot.clicked.connect(lambda: self.set_mode("hot"))
+        tabs.addWidget(self.tab_new)
+        tabs.addWidget(self.tab_hot)
+        tabs.addStretch(1)
+        lay.addLayout(tabs)
+
         self.list = QListWidget()
         self.list.setStyleSheet(
             "QListWidget{background:transparent;border:none;outline:none;}"
@@ -1350,7 +1425,7 @@ class HotPanel(QWidget):
         tip = QLabel("双击条目打开原帖")
         tip.setStyleSheet("color:#A9BECF;font-size:11px;")
         lay.addWidget(tip)
-        self.posts = []
+        self._update_tabs()
 
     def paintEvent(self, _):
         p = QPainter(self)
@@ -1360,7 +1435,36 @@ class HotPanel(QWidget):
         p.drawRoundedRect(QRectF(0.5, 0.5, self.width() - 1, self.height() - 1), 16, 16)
 
     def set_posts(self, posts):
-        self.posts = sorted(posts, key=lambda x: -x["heat"])
+        """缓存原始批次后按当前模式渲染；切换模式不会丢数据。"""
+        self.raw_posts = list(posts)
+        self._render()
+
+    def set_mode(self, mode):
+        """切换「最新 / 最热」：只重排重绘，不触发 refresh。"""
+        if mode not in ("new", "hot") or mode == self.mode:
+            return
+        self.mode = mode
+        self._update_tabs()
+        self._render()
+
+    def _update_tabs(self):
+        for b, active in ((self.tab_new, self.mode == "new"),
+                          (self.tab_hot, self.mode == "hot")):
+            b.setChecked(active)
+            b.setStyleSheet(TAB_ON if active else TAB_OFF)
+        self.title.setText("豚说 · 最新动态" if self.mode == "new" else "豚说 · 热帖榜")
+
+    def _render(self):
+        if self.mode == "new":
+            # 多圈子是按学校分组拼起来的，必须按发布时间重排，不能用列表原顺序。
+            # 解析不出绝对时间的条目（演示数据的「5分钟前」）排最后并保持拉取顺序。
+            # 将来十大热帖恢复匿名可用时老热帖会自然沉底；top_ten() 给无热度
+            # 榜单补的 1000/990 假分不参与时间排序。
+            self.posts = sorted(self.raw_posts,
+                                key=lambda p: post_time_key(p.get("time")),
+                                reverse=True)
+        else:
+            self.posts = sorted(self.raw_posts, key=lambda p: -p["heat"])
         self.list.clear()
         title_font = QFont("PingFang SC", 12)
         fm = QFontMetrics(title_font)
@@ -1373,7 +1477,14 @@ class HotPanel(QWidget):
             title.setFont(title_font)
             title.setStyleSheet("color:#2C4258;")
             title.setWordWrap(True)
-            meta = QLabel("%s · %s · 热度 %d" % (post["tag"] or "动态", post["author"], post["heat"]))
+            tag = post["tag"] or "动态"
+            if self.mode == "new":
+                # 各模式只显示自己的排序依据，避免 336px 面板里 meta 行被挤断
+                meta_text = "%s · %s · %s" % (
+                    tag, post["author"], short_post_time(post.get("time")) or "时间未知")
+            else:
+                meta_text = "%s · %s · 热度 %d" % (tag, post["author"], post["heat"])
+            meta = QLabel(meta_text)
             meta.setStyleSheet("color:#8FA6BE;font-size:11px;")
             v.addWidget(title)
             v.addWidget(meta)
