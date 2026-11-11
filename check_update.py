@@ -97,6 +97,17 @@ def check(timeout=8):
         r["message"] = "暂时连不上仓库，跳过更新检查（不影响使用）"
         return r
 
+    # detached HEAD / 手动 checkout 的分支可能没有 upstream，@{u} 会解析失败。
+    # 此时后面每条命令都会返回非 0，若不当成独立分支处理会误报「已是最新」。
+    try:
+        up = _git("rev-parse", "--abbrev-ref", "--symbolic-full-name",
+                  "@{u}", timeout=3)
+    except Exception:
+        up = None
+    if up is None or up.returncode != 0 or not up.stdout.strip():
+        r["message"] = "当前分支没有上游，跳过更新检查（不影响使用）"
+        return r
+
     try:
         cnt = _git("rev-list", "--count", "HEAD..@{u}", timeout=3)
         r["behind"] = int(cnt.stdout.strip() or 0) if cnt.returncode == 0 else 0
