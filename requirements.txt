@@ -1,7 +1,8 @@
-# 运行时依赖（macOS 12+ / Python 3.9~3.13）
-# 6.9.2 是在 macOS 12.6.1 Intel 上验证过的版本
+# 运行时依赖（macOS 11+ / Windows 10+ / Linux 桌面；Python 3.9~3.13，64 位）
+# PySide6 6.9.2 在 macOS 12.6.1 Intel 上验证过，三个平台共用同一版本。
+# 首次安装约 133 MB，由 bootstrap.py 自动装进 .venv。
 PySide6-Essentials==6.9.2
 
-# 仅重新生成 assets/pet.png、pet_blink.png 时需要
+# 仅重新生成 assets/pet.png、pet_blink.png 时需要（运行时不调用）
 # python3 assets/process_sprite.py
 Pillow>=10.0

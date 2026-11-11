@@ -51,6 +51,25 @@ ASSET_DIR = os.path.join(APP_DIR, "assets")
 CONFIG_PATH = os.path.join(APP_DIR, "config.json")
 STATE_PATH = os.path.join(APP_DIR, "state.json")
 
+# 平台适配：主程序逻辑全平台共用，只有「窗口属性 / 系统通知 / 字体 / 打包脚本」
+# 四处需要分支。macOS 分支保持与旧版逐字一致，Windows / Linux 走等价实现。
+IS_MAC = sys.platform == "darwin"
+IS_WIN = sys.platform.startswith("win")
+UI_FONT = ("PingFang SC" if IS_MAC else
+           "Microsoft YaHei UI" if IS_WIN else "Noto Sans CJK SC")
+
+
+def _read_version():
+    """从仓库根的 VERSION 读版本号；ZIP 分发或文件缺失时给兜底值。"""
+    try:
+        with open(os.path.join(APP_DIR, "VERSION"), "r", encoding="utf-8") as f:
+            return (f.readline().strip() or "4.2.0")
+    except OSError:
+        return "4.2.0"
+
+
+APP_VERSION = _read_version()
+
 # 只放「配置」：会随源码入库，用户手动编辑，程序启动时只读一次。
 DEFAULT_CONFIG = {
     "api_url": "",
@@ -273,6 +292,23 @@ class StudioFetcher(QThread):
             self.fail.emit(str(ex)[:80])
 
 
+class UpdateChecker(QThread):
+    """后台检查远端是否有新版本：只跑 git fetch / rev-list，绝不 pull、绝不写文件。
+
+    git fetch 可能几秒才返回，必须放进线程，不能卡住动画主线程。
+    """
+
+    done = Signal(dict)
+
+    def run(self):
+        try:
+            import check_update
+            self.done.emit(check_update.check())
+        except Exception as ex:            # 模块缺失 / git 异常都不该让桌宠崩
+            self.done.emit({"state": "unknown",
+                            "message": "更新检查跳过：%s" % str(ex)[:60]})
+
+
 # ----------------------------------------------------------------------
 class PetWindow(QWidget):
     """单窗口桌宠：精灵 + 内部气泡，永不新建窗口抢焦点。"""
@@ -292,7 +328,9 @@ class PetWindow(QWidget):
         self.setAttribute(Qt.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WA_ShowWithoutActivating, True)
         # macOS：Qt.Tool 窗口默认在 App 失去激活时自动隐藏（切到别的应用小豚就消失）
-        self.setAttribute(Qt.WA_MacAlwaysShowToolWindow, True)
+        # 该属性只在 macOS 有意义，Windows / Linux 上跳过，避免无谓的平台差异。
+        if IS_MAC:
+            self.setAttribute(Qt.WA_MacAlwaysShowToolWindow, True)
 
         self.cfg = cfg
         self.state = state if state is not None else load_state(cfg)
@@ -300,6 +338,8 @@ class PetWindow(QWidget):
         self.posts = []
         self.seen = set()
         self.paused = False
+        self._tray = None              # 托盘引用：Windows / Linux 的系统通知走它
+        self._update_worker = None     # 更新检查线程（只读 git，不写文件）
         self.first_load = True
         self.fish = int(self.state.get("fish", 0) or 0)
 
@@ -447,6 +487,9 @@ class PetWindow(QWidget):
 
         QTimer.singleShot(1200, lambda: self.say(
             self.studio["settings"]["greeting"], 4200))
+        # 开机后自检一次更新：只在「远端确实有新版」时才冒泡，避免每次启动都打扰。
+        # 设置 TUNSHUO_SKIP_UPDATE_CHECK=1 可完全关闭（不写 config.json）。
+        QTimer.singleShot(7000, lambda: self.check_for_update(quiet=True))
 
     # ---------- 素材与遮罩 ----------
     def _load(self, name):
@@ -813,7 +856,7 @@ class PetWindow(QWidget):
         self.update()
 
     def _bubble_font(self):
-        f = QFont("PingFang SC")
+        f = QFont(UI_FONT)
         f.setPixelSize(getattr(self, "_bubble_px", 13))
         return f
 
@@ -949,7 +992,7 @@ class PetWindow(QWidget):
             p.drawPixmap(int(x), int(y), a["pm"])
 
     def _paint_zzz(self, p):
-        p.setFont(QFont("PingFang SC", 13, QFont.DemiBold))
+        p.setFont(QFont(UI_FONT, 13, QFont.DemiBold))
         base_x = self._pet_offset.x() + self.pet_w - 4
         base_y = self._pet_offset.y() + 14
         for i in range(3):
@@ -1160,6 +1203,7 @@ class PetWindow(QWidget):
         m.addSeparator()
         m.addAction("查看热帖榜", self.toggle_panel)
         m.addAction("立即刷新", self.refresh)
+        m.addAction("检查更新", lambda: self.check_for_update(False))
         a = QAction("暂停新帖提醒", m, checkable=True)
         a.setChecked(self.paused)
         a.toggled.connect(self._toggle_pause)
@@ -1291,6 +1335,35 @@ class PetWindow(QWidget):
         else:
             self.say("还没配置形象工作台地址～")
 
+    # ---------- 版本 / 更新提醒 ----------
+    def check_for_update(self, quiet=True):
+        """quiet=True 只在有新版时提醒（开机自检）；菜单手动检查会显示检查结果。"""
+        if os.environ.get("TUNSHUO_SKIP_UPDATE_CHECK") == "1":
+            return
+        w = getattr(self, "_update_worker", None)
+        if w is not None and w.isRunning():
+            return
+        w = UpdateChecker()
+        w.done.connect(lambda r: self._on_update_result(r, quiet))
+        w.finished.connect(lambda w=w: self._update_done(w))
+        self._update_worker = w
+        w.start()
+
+    def _update_done(self, w):
+        w.deleteLater()
+        if self._update_worker is w:
+            self._update_worker = None
+
+    def _on_update_result(self, result, quiet):
+        state = result.get("state")
+        if state == "update":
+            # 气泡高度有上限，完整话术交给托盘通知 / 命令行，气泡只给一句短提示
+            self.say("小豚有新版本啦～\n让 agent 跑 git pull 就能更新", 8000)
+            self._notify("豚说小豚 · 有新版本",
+                         (result.get("message") or "有新版本可用")[:120])
+        elif not quiet:
+            self.say((result.get("message") or "已经是最新版本啦～")[:40], 5200)
+
     # ---------- 数据 ----------
     def refresh(self):
         self._workers = [w for w in getattr(self, "_workers", []) if w.isRunning()]
@@ -1341,16 +1414,31 @@ class PetWindow(QWidget):
             self.panel.set_posts(posts)
 
     def _notify(self, title, msg):
+        """跨平台系统通知。macOS 走 osascript（旧行为不变）；Windows / Linux 走 Qt 托盘气泡。
+
+        两者都用已有的开关与已有的托盘对象，不新增依赖、不新增接口、不写配置。
+        """
         # 工作台「新帖系统通知」开关优先（启动时已用 config.json 初始化过）
-        if not self.studio["settings"]["notify"] or sys.platform != "darwin":
+        if not self.studio["settings"]["notify"]:
             return
-        msg = msg.replace('"', "'")
-        title = title.replace('"', "'")
+        if IS_MAC:
+            safe_msg = msg.replace('"', "'")
+            safe_title = title.replace('"', "'")
+            try:
+                subprocess.Popen(
+                    ["osascript", "-e",
+                     'display notification "%s" with title "%s" subtitle "论坛动态"'
+                     % (safe_msg, safe_title)],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except Exception:
+                pass
+            return
+        tray = getattr(self, "_tray", None)
+        if tray is None or not QSystemTrayIcon.isSystemTrayAvailable():
+            return
         try:
-            subprocess.Popen(
-                ["osascript", "-e",
-                 'display notification "%s" with title "%s" subtitle "论坛动态"' % (msg, title)],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            if QSystemTrayIcon.supportsMessages():
+                tray.showMessage(title, msg, QSystemTrayIcon.Information, 5000)
         except Exception:
             pass
 
@@ -1361,7 +1449,8 @@ class HotPanel(QWidget):
         super().__init__(None, Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint
                          | Qt.Tool | Qt.NoDropShadowWindowHint)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
-        self.setAttribute(Qt.WA_MacAlwaysShowToolWindow, True)
+        if IS_MAC:
+            self.setAttribute(Qt.WA_MacAlwaysShowToolWindow, True)
         self.pet = pet
         self.resize(336, 440)          # 多了切换行，给列表补回等高的可视区域
         self.mode = "hot"              # 默认沿用旧行为：按热度出榜，零回归
@@ -1374,7 +1463,7 @@ class HotPanel(QWidget):
 
         head = QHBoxLayout()
         self.title = QLabel("豚说 · 热帖榜")
-        self.title.setFont(QFont("PingFang SC", 13, QFont.DemiBold))
+        self.title.setFont(QFont(UI_FONT, 13, QFont.DemiBold))
         self.title.setStyleSheet("color:#2C4258;")
         head.addWidget(self.title)
         head.addStretch(1)
@@ -1466,7 +1555,7 @@ class HotPanel(QWidget):
         else:
             self.posts = sorted(self.raw_posts, key=lambda p: -p["heat"])
         self.list.clear()
-        title_font = QFont("PingFang SC", 12)
+        title_font = QFont(UI_FONT, 12)
         fm = QFontMetrics(title_font)
         for post in self.posts[:60]:
             w = QWidget()
@@ -1582,6 +1671,15 @@ def load_state(cfg=None):
 
 
 def main():
+    if IS_WIN:
+        # Windows 上先声明 AppUserModelID，托盘气泡与任务栏才会显示「豚说小豚」
+        # 而不是 python.exe。ctypes 是标准库，失败也不影响启动。
+        try:
+            import ctypes
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+                "online.tunshuo.pet")
+        except Exception:
+            pass
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
     cfg = load_config()
@@ -1593,7 +1691,8 @@ def main():
     pet.show()
 
     tray = QSystemTrayIcon(QIcon(QPixmap(os.path.join(ASSET_DIR, "pet.png"))))
-    tray.setToolTip("豚说小豚")
+    tray.setToolTip("豚说小豚 v%s" % APP_VERSION)
+    pet._tray = tray          # Windows / Linux 的系统通知复用这个托盘对象
     tm = QMenu()
 
     def _sync_label():
@@ -1607,6 +1706,7 @@ def main():
     tm.addAction("回到右下角", lambda: (pet.show_pet(), pet._place_bottom_right()))
     tm.addAction("查看热帖榜", pet.toggle_panel)
     tm.addAction("立即刷新", pet.refresh)
+    tm.addAction("检查更新", lambda: pet.check_for_update(False))
     tm.addSeparator()
     tm.addAction("打开形象工作台", pet.open_studio)
     tm.addAction("重新同步形象", pet.force_studio_sync)

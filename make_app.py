@@ -3,6 +3,9 @@
 """
 把豚说小豚打包成 macOS .app（免终端、可放 Dock/启动台/应用程序文件夹）
 
+仅 macOS 可用；Windows 用 start_windows.bat，Linux / 通用安装用 bootstrap.py。
+主程序 tunshuo_pet_pro.py 三个平台共用同一份代码。
+
 用法：
     python3 make_app.py            # 生成并安装到 ~/Applications/豚说小豚.app
     TUNSHUO_INSTALL_DIR=/some/path python3 make_app.py   # 自定义安装位置
@@ -28,6 +31,14 @@ APP_NAME = "豚说小豚.app"
 INSTALL_DIR = os.environ.get("TUNSHUO_INSTALL_DIR") or os.path.expanduser("~/Applications")
 BUILD_DIR = os.path.join(APP_DIR, "build")
 BUNDLE_ID = "online.tunshuo.pet"
+
+
+def read_version():
+    try:
+        with open(os.path.join(APP_DIR, "VERSION"), "r", encoding="utf-8") as f:
+            return f.readline().strip() or "4.2.0"
+    except OSError:
+        return "4.2.0"
 
 LAUNCHER = """#!/bin/sh
 # 豚说小豚 启动器（由 make_app.py 生成）
@@ -82,6 +93,10 @@ def make_icns(src_png, out_icns):
 
 
 def build():
+    if sys.platform != "darwin":
+        sys.exit("make_app.py 只用于 macOS 生成 .app。\n"
+                 "Windows 请双击 start_windows.bat，或执行 py -3 bootstrap.py；\n"
+                 "Linux 请执行 python3 bootstrap.py。")
     app_path = os.path.join(BUILD_DIR, APP_NAME)
     shutil.rmtree(app_path, ignore_errors=True)
     macos_dir = os.path.join(app_path, "Contents", "MacOS")
@@ -101,8 +116,8 @@ def build():
         "CFBundleExecutable": "launcher",
         "CFBundleIconFile": "pet",
         "CFBundlePackageType": "APPL",
-        "CFBundleVersion": "3.0",
-        "CFBundleShortVersionString": "3.0",
+        "CFBundleVersion": read_version(),
+        "CFBundleShortVersionString": read_version(),
         "LSUIElement": True,          # 不显示 Dock 图标（菜单栏托盘已够用）
         "NSHighResolutionCapable": True,
         "LSMinimumSystemVersion": "11.0",
