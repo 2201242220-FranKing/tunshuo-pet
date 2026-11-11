@@ -7,6 +7,7 @@
 
 用法（学校 ID 可以一个一个加，桌宠会同时监控列表里所有学校）：
   python3 enable_forum.py --list                                  # 看当前监控了哪些学校
+  python3 enable_forum.py --check                                 # 逐校只读体检：ID 是否有效、有无帖子
   python3 enable_forum.py --add 圈子ID --name 学校简称             # 预览 + 只读联调
   python3 enable_forum.py --add 圈子ID --name 学校简称 --apply     # 正式加入
   python3 enable_forum.py --remove 圈子ID --apply                  # 移除某个学校
@@ -102,6 +103,46 @@ def verify(cfg):
         print("  这不代表配置写不了，可能是网络或圈子 ID 不对；可加 --no-verify 跳过。")
 
 
+def check_circles(cfg):
+    """逐校只读体检：每校只取 3 条，回读服务端圈子名，核对 ID 有没有填错。"""
+    circles = current_circles(cfg)
+    if not circles:
+        print("当前没有配置学校圈子（用 --add 加，或 --status 看状态）。")
+        return
+    if not str(cfg.get("forum_base") or "").strip():
+        print("当前未启用真实接口（forum_base 为空），无法联调。")
+        return
+    print("逐校只读体检（每校 3 条，不写盘）：")
+    for c in circles:
+        cid, label = c["id"], (c["name"] or "(未命名)")
+        try:
+            client = fa.ForumClient.from_config(cfg, circle_id=cid)
+            raw = client._get(fa.P_LATEST, {"circleId": cid, "pageNum": 1,
+                                            "pageSize": 3, "type": "dynamic"})
+            items = raw if isinstance(raw, list) else []
+            names, mismatch = [], 0
+            for p in items:
+                if not isinstance(p, dict):
+                    continue
+                pcid = str(p.get("circleId") or p.get("circle_id") or "").strip()
+                if pcid and pcid != cid:
+                    mismatch += 1
+                title = str(p.get("circleTitle") or "").strip()
+                if title and title not in names:
+                    names.append(title)
+            if mismatch:
+                note = "⚠ %d 条帖子 circleId 不符（已由适配层丢弃）" % mismatch
+            elif not items:
+                note = "⚠ 该圈子暂无帖子：ID 可能有误，或圈子还没人发帖，建议找技术核对"
+            else:
+                note = "回读圈子名 " + ("、".join(names) if names else "(响应未带 circleTitle)")
+            print("  %-8s %s  本页 %d 条 / recordsTotal=%s  %s"
+                  % (label, cid, len(items), client.last_total, note))
+        except fa.ForumError as e:
+            print("  %-8s %s  请求失败：%s" % (label, cid, e))
+    print("  说明：--check 只发只读请求，不会修改 config.json，也不会启动桌宠。")
+
+
 def write_cfg(cfg):
     try:
         TMP.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + "\n",
@@ -162,6 +203,10 @@ def build_remove(cfg, circle_id):
 
 def main():
     cfg = read_cfg()
+
+    if has("--check"):
+        check_circles(cfg)
+        return
 
     if has("--status") or has("--list"):
         show_status(cfg)

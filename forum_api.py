@@ -331,7 +331,8 @@ class ForumClient:
             schema=schema,
             detail_url_tpl=cfg.get("forum_detail_url") or "",
             allow_all=bool(cfg.get("forum_allow_all", False)),
-            timeout=10)
+            # 部分圈子（如空圈子）实测响应 5~6s，10s 容易误判超时；默认放宽到 15s
+            timeout=max(3, min(30, _as_number(cfg.get("forum_timeout"), 15))))
         params.update(kw)               # 多圈子时逐个覆盖 circle_id / allow_all
         return cls(**params)
 
@@ -344,7 +345,11 @@ class ForumClient:
         headers = {"User-Agent": "TunshuoPet/4.0", "Accept": "application/json"}
         if self.token:
             headers[self.token_header] = self.token
-        raw = self.transport(url, headers)
+        # 默认传输层才接受 timeout；自测注入的 lambda(u, h) 保持两参数不变
+        if self.transport is _default_transport:
+            raw = self.transport(url, headers, timeout=self.timeout)
+        else:
+            raw = self.transport(url, headers)
         if isinstance(raw, (bytes, bytearray)):
             raw = raw.decode("utf-8")
         if isinstance(raw, str):
