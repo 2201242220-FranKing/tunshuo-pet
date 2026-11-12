@@ -6,14 +6,15 @@
     python3 bootstrap.py --setup     # 只补依赖，不启动
     python3 bootstrap.py --check     # 只读体检：不建 venv、不装包、不写文件
 
-做四件事：
+做五件事：
   1. 校验 Python 版本（3.9~3.13，64 位）
   2. 缺 .venv 就建；当前不在虚拟环境里就用 .venv 的解释器重新执行自己
   3. 缺 PySide6 / Pillow 就自动 pip install -r requirements.txt
-  4. 后台启动 tunshuo_pet_pro.py（Windows 用 pythonw，不弹黑窗）
+  4. 调用 make_shortcut.py，本机动生成桌面 / 应用启动图标（幂等、失败不影响安装）
+  5. 后台启动 tunshuo_pet_pro.py（Windows 用 pythonw，不弹黑窗）
 
-全程不需要用户回答任何问题。只写 .venv/ 与 logs/ 两个目录（都已加入 .gitignore），
-不改 config.json、不写令牌、不调用除 PyPI 与已有 git 远端之外的任何服务。
+全程不需要用户回答任何问题。不写 config.json、不写令牌、不调用除 PyPI 与已有
+git 远端之外的任何服务；图标只在本机创建，已存在就跳过，绝不覆盖或删除用户文件。
 """
 
 import os
@@ -105,6 +106,23 @@ def setup(py):
     return True
 
 
+def ensure_shortcut():
+    """best-effort：生成本机启动图标。图标失败绝不能让安装或启动失败。"""
+    try:
+        r = run([sys.executable, os.path.join(APP_DIR, "make_shortcut.py")],
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                timeout=90, text=True)
+        lines = (r.stdout or "").strip().splitlines()
+        keys = ("SHORTCUT_", "已在桌面", "桌面快捷方式", "应用图标", "桌面图标",
+                "生成 .app 失败", "快捷方式创建失败")
+        for line in [x for x in lines if x.startswith(keys)][-6:]:
+            say("  " + line)
+        return r.returncode == 0
+    except Exception as ex:
+        say("启动图标生成跳过：%s（可手动跑 python3 make_shortcut.py）" % str(ex)[:100])
+        return False
+
+
 def launch(py):
     os.makedirs(LOG_DIR, exist_ok=True)
     log_path = os.path.join(LOG_DIR, "pet.log")
@@ -121,8 +139,7 @@ def launch(py):
                              start_new_session=True)
     say("已启动小豚（PID %d）。日志：%s" % (p.pid, log_path))
     say("退出：点系统托盘 → 退出。重复启动会出现第二只，先退出再启动。")
-    if IS_MAC:
-        say("想要双击免终端运行，可再执行一次：python3 make_app.py")
+    say("以后可直接双击桌面 / 应用里的「豚说小豚」图标启动，不用再开终端。")
     return True
 
 
@@ -164,8 +181,9 @@ def main():
 
     if not setup(sys.executable):
         return 2
+    ensure_shortcut()
     if "--setup" in args:
-        say("环境已就绪。运行 python3 tunshuo_pet_pro.py 或再跑一次 bootstrap.py 即可启动。")
+        say("环境已就绪。双击桌面 / 应用里的「豚说小豚」图标，或再跑一次 bootstrap.py 即可启动。")
         return 0
     return 0 if launch(sys.executable) else 2
 

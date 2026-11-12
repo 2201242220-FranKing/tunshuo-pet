@@ -10,8 +10,8 @@
 
 ```
 请读取仓库 https://github.com/2201242220-FranKing/tunshuo-pet （或我给你的本地目录），
-按里面的 AGENTS.md 自动识别操作系统、安装并补齐缺失依赖、启动小豚桌宠，
-并检查是否有新版本。缺什么你自己处理，不用问我。
+按里面的 AGENTS.md 自动识别操作系统、安装并补齐缺失依赖、在桌面/应用里生成启动图标、
+启动小豚桌宠，并检查是否有新版本。缺什么你自己处理，不用问我。
 ```
 
 如果仓库已经 clone 到本地，换成：
@@ -38,16 +38,20 @@ python3 -c "import sys, platform; print(sys.platform, platform.machine())"
 
 | 判定 | 系统 | 用哪条路径 | 启动命令 |
 |---|---|---|---|
-| `darwin` | macOS 11+ | macOS 版 | `python3 bootstrap.py`；想要双击图标再跑 `python3 make_app.py` 生成 `.app` |
-| `win32` | Windows 10 / 11 | Windows 版 | `py -3 bootstrap.py`，或双击 `start_windows.bat` |
-| 其它 | Linux 桌面（实验性） | 通用版 | `python3 bootstrap.py` |
+| `darwin` | macOS 11+ | macOS 版 | `python3 bootstrap.py`，自动生成 `~/Applications/豚说小豚.app` + 桌面图标 |
+| `win32` | Windows 10 / 11 | Windows 版 | `py -3 bootstrap.py`，自动生成桌面「豚说小豚」快捷方式 |
+| 其它 | Linux 桌面（实验性） | 通用版 | `python3 bootstrap.py`，自动生成桌面 / 应用菜单 `.desktop` |
+
+**启动图标是安装流程的一部分，不用额外问用户、也不用单独执行打包命令**：`bootstrap.py`
+在补完依赖后会自动调用 `make_shortcut.py`，幂等创建（已存在就跳过、不覆盖、不删除）。
 
 **重要**：三个平台**共用同一份主程序 `tunshuo_pet_pro.py`**，差别只在启动器：
 
 | 文件 | 平台 | 作用 |
 |---|---|---|
-| `bootstrap.py` | 全平台 | 建 venv、补齐依赖、后台启动（**首选，一条命令搞定**） |
-| `make_app.py` | 仅 macOS | 生成 `~/Applications/豚说小豚.app`，双击免终端 |
+| `bootstrap.py` | 全平台 | 建 venv、补齐依赖、生成启动图标、后台启动（**首选，一条命令搞定**） |
+| `make_shortcut.py` | 全平台 | 本机动生成桌面 / 应用启动图标（由 bootstrap 自动调用，也可手动重跑） |
+| `make_app.py` | 仅 macOS | 被 `make_shortcut.py` 调用，生成 `~/Applications/豚说小豚.app` |
 | `start_macos.command` | 仅 macOS | 双击运行（走 bootstrap） |
 | `start_windows.bat` | 仅 Windows | 双击运行（走 bootstrap） |
 
@@ -62,8 +66,14 @@ python3 bootstrap.py              # Windows：py -3 bootstrap.py
 ```
 
 它会自动完成：校验 Python 3.9~3.13（64 位）→ 缺 `.venv` 就建 → 用 venv 解释器重跑自己
-→ 缺 `PySide6-Essentials` / `Pillow` 就 `pip install -r requirements.txt` → 后台启动桌宠。
-**命令会立即返回**，不会卡住你的会话；日志在 `logs/pet.log`。
+→ 缺 `PySide6-Essentials` / `Pillow` 就 `pip install -r requirements.txt`
+→ **调用 `make_shortcut.py` 生成桌面 / 应用启动图标** → 后台启动桌宠。
+**命令会立即返回**，不会卡住你的会话；日志在 `logs/pet.log`。图标生成是 best-effort：
+失败只打印一行提示，不影响桌宠启动；需要时可手动跑 `python3 make_shortcut.py`（`--check` 只读预览）。
+
+图标落点：macOS = `~/Applications/豚说小豚.app` + 桌面同名符号链接；
+Windows = 桌面「豚说小豚.lnk」（指向本机 `pythonw.exe` + `bootstrap.py`）；
+Linux = 桌面与应用菜单各一个 `.desktop`。全部**本机生成**，绑定本机 Python 与源码目录。
 
 若你希望自己管理进程（长会话推荐），改用两步：
 
@@ -79,7 +89,7 @@ python3 tunshuo_pet_pro.py         # 用后台任务方式启动，会话可继�
 
 ```bash
 python3 bootstrap.py --check        # 环境体检：只读，输出 ENV_OK / ENV_MISSING
-python3 forum_api.py --selftest     # 接口层 67 项离线自测
+python3 forum_api.py --selftest     # 接口层 73 项离线自测
 python3 selftest_panel.py           # 面板 / 播报 45 项离屏自测，不弹窗
 python3 diagnose.py --selftest      # 错误分类自测，不联网
 ```
@@ -94,8 +104,12 @@ python3 diagnose.py                 # 只读、联网：DNS → HTTPS → 真实
 
 诊断会先打印**当前生效的代理 / VPN**（`HTTP_PROXY` / `HTTPS_PROXY`、macOS 系统代理、Windows 注册表代理，
 Python 的 `urlopen` 会自动继承）。若检测到代理且请求失败，脚本会自动做一次「绕过代理直连」对照：
-直连能通就明确输出 `DIAGNOSIS_FAIL 代理 / VPN 网络环境`，此时**优先让用户退出 VPN 或把
-`alumni.qiyuanheshan.com` 加入代理白名单 / `NO_PROXY`，然后重启小豚**——这是实测最常见的原因，
+直连能通就明确输出 `DIAGNOSIS_FAIL 代理 / VPN 网络环境`。
+
+**但桌宠本身已内置容错**：论坛请求走代理失败时，会绕过代理对同一 URL 直连重试一次
+（不改系统代理、不关证书校验、不写配置）。所以「不关 VPN 也能正常出榜」是预期行为，
+诊断报告代理不通也**不代表桌宠坏了**，不必让用户改网络。只有桌宠**确实仍拉不到**时，
+才建议退出 VPN / 换节点 / 把 `alumni.qiyuanheshan.com` 加入代理白名单或 `NO_PROXY` 后重启小豚，
 不要先去装证书、换依赖或改 `config.json`。
 
 最后一行是 `DIAGNOSIS_OK` 或 `DIAGNOSIS_FAIL`，并附可照做的建议。按建议自行补齐环境即可；
@@ -137,7 +151,8 @@ python3 check_update.py
 - 不调用除 **PyPI、仓库自身 git 远端**、`config.json` 里已配置的论坛地址
   `https://alumni.qiyuanheshan.com` 与本地工作台 `127.0.0.1:8770` 之外的服务。
 - 不把别人打包好的 `.app` / `.exe` 拷来用：`make_app.py` 生成的启动器绑定了本机
-  Python 路径与源码目录，换机器必须在本机重新生成。
+  Python 路径与源码目录，换机器必须**在本机**重新生成（`make_shortcut.py` 就是干这个的，
+  由 `bootstrap.py` 自动调用，属于正常流程）。
 - 不替用户发帖、回复或做任何写操作；论坛接口只读，且 `page` / `detail` 匿名可读、
   **不需要登录、不需要用户 provide 任何东西**。
 

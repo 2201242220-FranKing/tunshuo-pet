@@ -276,18 +276,56 @@ def _normalize_posts(items, schema, detail_url_tpl=""):
     return out
 
 
+def _proxy_applies(url):
+    """判断该 URL 是否会被 urllib 自动送进代理。
+
+    Python 的 urlopen 会继承 HTTP_PROXY / HTTPS_PROXY、macOS 系统代理、
+    Windows 注册表代理；VPN 客户端改的正是这几处。
+    """
+    try:
+        proxies = urllib.request.getproxies() or {}
+        if not proxies:
+            return False
+        host = urllib.parse.urlparse(url).hostname or ""
+        return not urllib.request.proxy_bypass(host)
+    except Exception:
+        return False
+
+
+def _direct_transport(url, headers, timeout=10):
+    """绕过代理直连，仅用于代理请求失败后的兜底重试。
+
+    只影响本次请求：不改系统代理设置、不写配置、不关闭证书校验。
+    """
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    req = urllib.request.Request(url, headers=headers)
+    with opener.open(req, timeout=timeout) as r:
+        return r.read().decode("utf-8")
+
+
 def _default_transport(url, headers, timeout=10):
-    """默认 HTTP GET。返回原始文本，交给 _get 解析。"""
+    """默认 HTTP GET。返回原始文本，交给 _get 解析。
+
+    开着 VPN / 代理但代理连不通论坛时，自动直连重试一次（同一 URL、只读 GET）。
+    没走代理的失败原样抛出，不重复请求；直连仍失败则保留第一条异常便于诊断。
+    """
     req = urllib.request.Request(url, headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return r.read().decode("utf-8")
     except urllib.error.HTTPError as e:
-        raise ForumError("接口 HTTP %s" % e.code)
+        first = ForumError("接口 HTTP %s" % e.code)
     except urllib.error.URLError as e:
-        raise ForumError("连不上论坛：%s" % str(e.reason)[:40])
+        first = ForumError("连不上论坛：%s" % str(e.reason)[:40])
     except Exception as e:
-        raise ForumError("请求失败：%s" % str(e)[:40])
+        first = ForumError("请求失败：%s" % str(e)[:40])
+
+    if not _proxy_applies(url):
+        raise first
+    try:
+        return _direct_transport(url, headers, timeout=timeout)
+    except Exception:
+        raise first
 
 
 class ForumClient:
@@ -829,6 +867,75 @@ def _selftest():
     ca = ForumClient("https://forum.example.com", circle_id="", allow_all=True,
                      transport=circle_mix)
     check("全站模式不做圈子过滤", len(ca.latest()) == 3)
+
+    # --- 代理 / VPN 不通时的直连兜底（全离线桩，不发任何网络请求）---
+    import urllib.request as _ur
+
+    class _Resp:
+        def __init__(self, body):
+            self.body = body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return self.body.encode("utf-8")
+
+    saved = (_ur.getproxies, _ur.proxy_bypass, _ur.urlopen, _ur.build_opener)
+    calls = {"proxy": 0, "direct": 0}
+    proxy_on = True
+    direct_ok = True
+
+    class _DirectOpener:
+        def open(self, req, timeout=None):
+            calls["direct"] += 1
+            if direct_ok:
+                return _Resp('{"code":200,"data":[]}')
+            raise urllib.error.URLError("direct also down")
+
+    def fake_urlopen(req, timeout=None):
+        calls["proxy"] += 1
+        raise urllib.error.URLError("proxy down")
+
+    _ur.getproxies = lambda: ({"https": "http://127.0.0.1:9"} if proxy_on else {})
+    _ur.proxy_bypass = lambda host: False
+    _ur.urlopen = fake_urlopen
+    _ur.build_opener = lambda *a: _DirectOpener()
+    url = "https://alumni.qiyuanheshan.com/app/dynamic/page"
+    try:
+        check("检测到代理时判定为走代理", _proxy_applies(url))
+        proxy_on = False
+        check("无代理时不触发直连重试", not _proxy_applies(url))
+        proxy_on = True
+        _ur.proxy_bypass = lambda host: True
+        check("域名在绕过列表时不触发直连重试", not _proxy_applies(url))
+        _ur.proxy_bypass = lambda host: False
+
+        out = _default_transport(url, {}, timeout=1)
+        check("代理失败后直连重试成功",
+              out == '{"code":200,"data":[]}' and calls["direct"] == 1)
+
+        proxy_on = False
+        calls["direct"] = 0
+        try:
+            _default_transport(url, {}, timeout=1)
+            check("无代理失败不重复请求", False)
+        except ForumError as ex:
+            check("无代理失败不重复请求",
+                  calls["direct"] == 0 and "proxy down" in str(ex))
+
+        proxy_on = True
+        direct_ok = False
+        try:
+            _default_transport(url, {}, timeout=1)
+            check("直连也失败时保留原始异常", False)
+        except ForumError as ex:
+            check("直连也失败时保留原始异常", "proxy down" in str(ex))
+    finally:
+        (_ur.getproxies, _ur.proxy_bypass, _ur.urlopen, _ur.build_opener) = saved
 
     print("\nSELFTEST_OK %d 项通过" % ok)
 

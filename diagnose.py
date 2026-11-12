@@ -127,6 +127,9 @@ def _fail(detail, base, has_proxy=False, direct_ok=False):
     print("\n建议按顺序尝试：")
     for i, tip in enumerate(tips, 1):
         print("  %d. %s" % (i, tip))
+    if reason == "代理 / VPN 网络环境":
+        print("\n注意：桌宠本身已内置「代理失败自动直连重试」，所以即便这里判定代理不通，"
+              "桌宠刷新仍可能正常出榜——本诊断如实反映网络环境，不影响使用。")
     print("\n快速二分：用浏览器打开 %s" % base)
     print("浏览器能开但这里失败 = 本机 Python / 证书 / 代理问题；浏览器也开不了 = 网络或服务端问题。")
     return 1

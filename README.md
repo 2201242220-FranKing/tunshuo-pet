@@ -3,7 +3,7 @@
 豚说校园论坛的桌面宠物：一只蓝色小鲸鱼常驻桌面右下角，会播报最新帖、随机做待机动作，也能被拖拽、投喂。**macOS / Windows 10·11 共用同一份源码**，Linux 桌面为实验性支持。当前版本先在本地跑通体验，后续再迁移到小程序端。
 
 仓库：https://github.com/2201242220-FranKing/tunshuo-pet
-当前版本：见仓库根 `VERSION`（v4.2.2）
+当前版本：见仓库根 `VERSION`（v4.2.3）
 
 ## 分享给别人：一句话就够
 
@@ -66,7 +66,7 @@
 | 系统通知 | `osascript display notification` | Qt 托盘 `showMessage()`（气泡 / Toast） |
 | 窗口属性 | 额外设 `WA_MacAlwaysShowToolWindow` | 跳过（该属性仅 macOS 有效） |
 | 界面字体 | PingFang SC | Microsoft YaHei UI / Noto Sans CJK SC |
-| 打包 / 启动 | `make_app.py` 生成 `.app`、`start_macos.command` | `start_windows.bat`、通用 `bootstrap.py` |
+| 打包 / 启动 | `make_shortcut.py` 自动生成 `.app` + 桌面图标、`start_macos.command` | 桌面快捷方式 / `.desktop`、`start_windows.bat`、通用 `bootstrap.py` |
 | 日志 | `.app` 启动器写 `~/Library/Logs/tunshuo-pet.log`；bootstrap 写 `logs/pet.log` | `logs/pet.log` |
 
 > PySide6 6.9.2 在 macOS 12.6.1 / Intel 上验证过；Windows / Linux 用的是同一 Qt 版本，透明窗口遮罩行为基本一致，极高 DPI 与多屏缩放可能有细微差异。
@@ -81,8 +81,15 @@ cd tunshuo-pet
 python3 bootstrap.py              # Windows PowerShell / CMD 用：py -3 bootstrap.py
 ```
 
-它自动建 `.venv`、补齐缺失依赖、后台启动桌宠，命令立即返回，日志在 `logs/pet.log`。
-只装环境不启动用 `python3 bootstrap.py --setup`；只读体检用 `python3 bootstrap.py --check`。
+它自动建 `.venv`、补齐缺失依赖、**生成桌面 / 应用里的启动图标**、后台启动桌宠，命令立即返回，
+日志在 `logs/pet.log`。只装环境不启动用 `python3 bootstrap.py --setup`（图标同样会生成）；
+只读体检用 `python3 bootstrap.py --check`（不写盘）。
+
+图标由 `make_shortcut.py` 生成，**只用标准库和系统自带能力**，在本机创建、绑定本机 Python 与源码目录：
+macOS 得 `~/Applications/豚说小豚.app` + 桌面同名符号链接；Windows 得桌面「豚说小豚.lnk」
+（指向 `pythonw.exe` + `bootstrap.py`）；Linux 得桌面 / 应用菜单两个 `.desktop`。
+幂等：已存在就跳过，不覆盖、不删除；生成失败只打印提示，不影响桌宠运行。
+手动重跑 `python3 make_shortcut.py`，`--check` 可只读预览将要创建什么。
 
 ### 手动分步（想自己控制进程时）
 
@@ -108,16 +115,21 @@ python tunshuo_pet_pro.py
 
 ### 双击运行（免终端）
 
-| 平台 | 操作 |
-|---|---|
-| macOS | 双击 `start_macos.command`；或执行 `python3 make_app.py` 生成 `~/Applications/豚说小豚.app` 后双击 |
-| Windows | 双击 `start_windows.bat`（首次会自动装依赖） |
+安装时已自动在桌面 / 应用里生成启动图标，之后直接双击即可，不用再开终端。
+
+| 平台 | 自动生成的图标 | 备用启动方式 |
+|---|---|---|
+| macOS | `~/Applications/豚说小豚.app` + 桌面同名图标 | 双击 `start_macos.command` |
+| Windows | 桌面「豚说小豚.lnk」 | 双击 `start_windows.bat` |
+| Linux | 桌面 / 应用菜单「豚说小豚.desktop」 | `python3 bootstrap.py` |
 
 启动后系统托盘出现小豚图标（macOS 在菜单栏、Windows 在任务栏通知区，小豚不占 Dock / 任务栏按钮）。
 **改过源码或 `VERSION` 后必须重启桌宠**才加载新代码。
 
-## 打包成 macOS .app（免终端，仅 macOS）
+## 手动重建 macOS .app（免终端，仅 macOS）
 
+> **正常安装不用看这一节**：`bootstrap.py` 已自动调用 `make_shortcut.py` 完成 `.app` 与桌面图标。
+> 下面命令只在换了 Python 解释器、改了图标、或图标被误删时需要手动重跑。
 > Windows 用户不用看这一节：双击 `start_windows.bat` 即可，它会走 `bootstrap.py` 自动装依赖并后台启动。
 
 ```bash
@@ -224,7 +236,7 @@ python3 make_app.py
 **自检命令**（都不写任何配置）：
 
 ```bash
-python3 forum_api.py --selftest                          # 67 项离线自测，不发网络请求
+python3 forum_api.py --selftest                          # 73 项离线自测，不发网络请求
 python3 selftest_panel.py                                # 45 项离屏 UI 自测，检查榜单切换与播报口径
 python3 diagnose.py --selftest                           # 错误分类自测，不联网
 python3 diagnose.py                                      # 拉取失败时的一键网络诊断（只读、联网）
@@ -297,7 +309,8 @@ python3 enable_forum.py --circle-id <圈子ID> --apply         # 旧写法：只
 tunshuo-pet/
 ├── AGENTS.md              给对方 AI agent 的自动安装说明书（分享时只需发仓库）
 ├── VERSION                版本戳；更新检查与 .app 版本号都读它
-├── bootstrap.py           全平台一键安装：建 venv / 补齐依赖 / 后台启动
+├── bootstrap.py           全平台一键安装：建 venv / 补齐依赖 / 生成图标 / 后台启动
+├── make_shortcut.py       自动生成桌面 / 应用启动图标（三平台，幂等，bootstrap 自动调用）
 ├── check_update.py        只读更新检查（git fetch / rev-list / show，绝不自动 pull）
 ├── start_windows.bat      Windows 双击启动器
 ├── start_macos.command    macOS 双击启动器
@@ -345,7 +358,8 @@ python3 assets/process_sprite.py
 - `assets/skins/placeholder/` 是**程序从现有 `pet.png` 切出来的技术验证包**，不是最终美术：小角度（头 ≤10°、手 ≤35°）没有破洞，角度再大会露出同色底补的月牙。正式皮肤请按 `tunshuo-pet-studio/JOINT_SPEC.md` 重画挖空底图与部件层，直接放进工作台替换即可，代码不用改。
 - 无边框透明窗口必须关掉系统投影（`Qt.NoDropShadowWindowHint`），否则动作播放、遮罩变矩形时，macOS 会在角色背后投出一块灰黑方块。
 - 若启动后没有反应：用 `bootstrap.py` 启动的看 `logs/pet.log`，用 macOS `.app` 启动的看 `~/Library/Logs/tunshuo-pet.log`；也可先跑 `python3 bootstrap.py --check` 确认依赖齐全。
-- **出现「拉取失败」**：**先怀疑代理 / VPN**。桌宠用 Python 标准库 `urllib` 发请求，会自动继承 `HTTP_PROXY` / `HTTPS_PROXY`、macOS 系统代理、Windows 注册表代理；VPN 客户端改的就是这几处，代理节点连不上国内论坛域名时，4 所学校会同时失败并整体报「拉取失败」。最快验证是退出 VPN 或把 `alumni.qiyuanheshan.com` 加入代理白名单 / `NO_PROXY` 后重启小豚。跑 `python3 diagnose.py`（只读、联网）可自动确认：它会打印当前生效的代理，并在失败时做一次「绕过代理直连」对照，直连能通就直接给出 `DIAGNOSIS_FAIL 代理 / VPN 网络环境`。其余情况再按证书、超时、DNS 的建议处理。气泡高度上限 96px，放不下英文异常，完整原因会写进日志：`bootstrap.py` 启动看 `logs/pet.log`，`.app` 启动看 `~/Library/Logs/tunshuo-pet.log`。贴诊断输出或日志末尾即可，不必截图气泡。
+- **网络与代理 / VPN**：桌宠用 Python 标准库 `urllib` 发请求，会自动继承 `HTTP_PROXY` / `HTTPS_PROXY`、macOS 系统代理、Windows 注册表代理（VPN 客户端改的就是这几处）。**已内置容错**：论坛请求走代理失败时，会绕过代理对同一 URL 直连重试一次——不改系统代理设置、不关证书校验、不写配置，所以开着 VPN 通常也能正常出榜；没走代理的失败不会重复请求，直连也失败则保留原始异常便于定位。
+- **仍出现「拉取失败」**：跑 `python3 diagnose.py`（只读、联网），它会打印当前生效的代理，并在失败时做一次「绕过代理直连」对照，直连能通就给出 `DIAGNOSIS_FAIL 代理 / VPN 网络环境`。诊断如实反映网络环境，**报告代理不通不代表桌宠坏了**；只有桌宠确实拉不到时，才考虑退出 VPN / 换节点 / 把 `alumni.qiyuanheshan.com` 加入代理白名单或 `NO_PROXY` 后重启，其余再按证书、超时、DNS 的建议处理。气泡高度上限 96px，放不下英文异常，完整原因会写进日志：`bootstrap.py` 启动看 `logs/pet.log`，`.app` 启动看 `~/Library/Logs/tunshuo-pet.log`。贴诊断输出或日志末尾即可，不必截图气泡。
 
 ## 版本与更新提醒
 
@@ -382,6 +396,7 @@ python3 assets/process_sprite.py
 
 | 版本 | 日期 | 内容 |
 |---|---|---|
+| 4.2.3 | 2026-11-12 | 论坛请求在代理 / VPN 不通时自动直连重试一次（不关 VPN 也能出榜）；新增 `make_shortcut.py`，安装时自动在桌面 / 应用生成本机启动图标（macOS `.app`、Windows `.lnk`、Linux `.desktop`）；接口层自测 67 → 73 项 |
 | 4.2.2 | 2026-11-12 | 新增 `diagnose.py` 一键网络诊断（含代理 / VPN 检测与直连对照）；拉取失败时完整异常写日志、气泡改人话；修复诊断分类遇到异常对象会崩溃的问题；把 VPN/代理列为排障首项 |
 | 4.2.1 | 2026-11-11 | 修复更新检查在 detached HEAD / 无 upstream 时误报「已是最新」，改为 `UNKNOWN` 静默跳过 |
 | 4.2.0 | 2026-11-11 | 新增 `AGENTS.md` 自动安装说明、`bootstrap.py` 一键补依赖、Windows 支持（托盘通知 / 字体 / `start_windows.bat`）、`VERSION` 版本戳与三层更新提醒 |
