@@ -276,6 +276,44 @@ class Fetcher(QThread):
             self.fail.emit(str(ex)[:80])
 
 
+def _failure_hint(msg):
+    """把底层异常归成气泡放得下的一句人话；完整原因另写日志。"""
+    s = (msg or "").lower()
+    if "certificate" in s or "ssl" in s:
+        return "证书验证失败"
+    if "timed out" in s or "timeout" in s:
+        return "请求超时"
+    if "getaddrinfo" in s or "nodename" in s or "nameresolution" in s:
+        return "连不上论坛（DNS）"
+    if "proxy" in s or "407" in s:
+        return "代理设置问题"
+    if "http 4" in s or "http 5" in s:
+        return "论坛接口异常"
+    return "连不上论坛"
+
+
+def _log_fetch_failure(msg):
+    """完整异常留给日志：bootstrap.py 已把 stdout 收进 logs/pet.log。
+
+    Windows 用 pythonw 启动时 sys.stdout 可能为 None，此时退化成自己追加日志。
+    只写日志，不写配置、不写令牌。
+    """
+    text = "[豚说] 拉取失败：%s\n" % msg
+    try:
+        sys.stdout.write(text)
+        sys.stdout.flush()
+        return
+    except Exception:
+        pass
+    try:
+        d = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, "pet.log"), "a", encoding="utf-8") as f:
+            f.write(text)
+    except OSError:
+        pass
+
+
 class StudioFetcher(QThread):
     """拉形象配置 + 下载配饰图片，全部放在线程里，绝不阻塞动画。"""
     ok = Signal(dict)
@@ -1371,10 +1409,15 @@ class PetWindow(QWidget):
             return
         w = Fetcher(self.source)
         w.ok.connect(self._on_posts)
-        w.fail.connect(lambda m: self.say("拉取失败：%s" % m))
+        w.fail.connect(self._on_fetch_fail)
         w.finished.connect(lambda w=w: self._worker_done(w))
         self._workers.append(w)
         w.start()
+
+    def _on_fetch_fail(self, msg):
+        # 气泡高度上限 96px，塞不下英文异常；只显示归类后的一句人话，完整原因写日志。
+        _log_fetch_failure(msg)
+        self.say("拉取失败：%s\n让 agent 跑 diagnose.py" % _failure_hint(msg), 8000)
 
     def _worker_done(self, w):
         if w in getattr(self, "_workers", []):

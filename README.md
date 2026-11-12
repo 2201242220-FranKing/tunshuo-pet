@@ -3,7 +3,7 @@
 豚说校园论坛的桌面宠物：一只蓝色小鲸鱼常驻桌面右下角，会播报最新帖、随机做待机动作，也能被拖拽、投喂。**macOS / Windows 10·11 共用同一份源码**，Linux 桌面为实验性支持。当前版本先在本地跑通体验，后续再迁移到小程序端。
 
 仓库：https://github.com/2201242220-FranKing/tunshuo-pet
-当前版本：见仓库根 `VERSION`（v4.2.1）
+当前版本：见仓库根 `VERSION`（v4.2.2）
 
 ## 分享给别人：一句话就够
 
@@ -225,12 +225,14 @@ python3 make_app.py
 
 ```bash
 python3 forum_api.py --selftest                          # 67 项离线自测，不发网络请求
-python3 selftest_panel.py                                # 36 项离屏 UI 自测，检查榜单切换与播报口径
+python3 selftest_panel.py                                # 45 项离屏 UI 自测，检查榜单切换与播报口径
+python3 diagnose.py --selftest                           # 错误分类自测，不联网
+python3 diagnose.py                                      # 拉取失败时的一键网络诊断（只读、联网）
 python3 forum_api.py --live --circle-id <学校圈子ID>     # 真实只读联调，作者自动打码
 python3 forum_api.py --live --all                        # 不带圈子 ID，拉全站（仅验证用）
 ```
 
-**多学校监控**：`forum_circles` 里每加一个学校，桌宠下次刷新就会多拉一个圈子，合并成一张按热度排序的榜单；条目标签会带学校简称。某个学校接口失败只影响它自己，其他学校照常出榜；全部失败时沿用上一轮结果，不会清空榜单。帖子若带 `circleId` 但与请求的圈子不符会被丢弃，防止 ID 填错或服务端回落全站时串进别校数据。上限 20 个学校，`seen` 去重上限已从 200 提到 1000，避免多学校时旧帖被误判成新帖。旧的 `forum_circle_id` 单值写法继续有效。
+**多学校监控**：`forum_circles` 里每加一个学校，桌宠下次刷新就会多拉一个圈子，合并去重成一张榜单（默认按热度排，面板可切「最新」按发布时间排）；条目标签会带学校简称。某个学校接口失败只影响它自己，其他学校照常出榜；全部失败时沿用上一轮结果，不会清空榜单。帖子若带 `circleId` 但与请求的圈子不符会被丢弃，防止 ID 填错或服务端回落全站时串进别校数据。上限 20 个学校，`seen` 去重上限已从 200 提到 1000，避免多学校时旧帖被误判成新帖。旧的 `forum_circle_id` 单值写法继续有效。
 
 **启用 / 增删学校（用 `enable_forum.py`，默认只预览不写盘）**：
 
@@ -287,7 +289,7 @@ python3 enable_forum.py --circle-id <圈子ID> --apply         # 旧写法：只
 - **播报口径已统一为发布时间最新的一条**：来新帖时取新帖里时间最新的（原来是热度最高），气泡与系统通知显示时间；单击桌宠也由「现在最火的是」改为「最新的一条是」，同样显示时间与作者。榜单「最新」、新帖播报、单击播报三处现在共用同一个 `post_time_key()`。
 - 两个模式都不显示对方模式的排序值，避免 336px 面板里第二行被挤断。接口仍不返回 `url`，双击条目依旧打不开原帖（待技术给 H5 规则，或改用已有的匿名 `detail` 接口做面板内详情）。
 
-回归自测：`python3 forum_api.py --selftest`（67 项，接口层）与 `python3 selftest_panel.py`（36 项，离屏检查榜单切换与三处播报口径）都不联网、不写配置、不弹窗。
+回归自测：`python3 forum_api.py --selftest`（67 项，接口层）与 `python3 selftest_panel.py`（45 项，离屏检查榜单切换与三处播报口径）都不联网、不写配置、不弹窗。
 
 ## 目录结构
 
@@ -306,7 +308,8 @@ tunshuo-pet/
 ├── skin_rig.py            皮肤 manifest 校验、父子变换链、z 序、包围盒
 ├── forum_api.py           论坛 REST 适配层（真实字段已校准，默认不启用，可离线/联网自检）
 ├── enable_forum.py        论坛接口启用/回退/增删学校/逐校体检（默认只预览，--apply 才写配置）
-├── selftest_panel.py      榜单切换与播报口径的离屏自测（36 项，不联网不写盘）
+├── selftest_panel.py      榜单切换与播报口径的离屏自测（45 项，不联网不写盘）
+├── diagnose.py            拉取失败一键诊断（只读、联网，输出 DIAGNOSIS_OK / FAIL）
 ├── 论坛接口待确认清单.txt   可直接转发技术的追问清单（含已实测通过的项）
 ├── make_app.py            macOS .app 打包脚本（仅 macOS）
 ├── config.json            用户配置（入库）
@@ -342,6 +345,7 @@ python3 assets/process_sprite.py
 - `assets/skins/placeholder/` 是**程序从现有 `pet.png` 切出来的技术验证包**，不是最终美术：小角度（头 ≤10°、手 ≤35°）没有破洞，角度再大会露出同色底补的月牙。正式皮肤请按 `tunshuo-pet-studio/JOINT_SPEC.md` 重画挖空底图与部件层，直接放进工作台替换即可，代码不用改。
 - 无边框透明窗口必须关掉系统投影（`Qt.NoDropShadowWindowHint`），否则动作播放、遮罩变矩形时，macOS 会在角色背后投出一块灰黑方块。
 - 若启动后没有反应：用 `bootstrap.py` 启动的看 `logs/pet.log`，用 macOS `.app` 启动的看 `~/Library/Logs/tunshuo-pet.log`；也可先跑 `python3 bootstrap.py --check` 确认依赖齐全。
+- **出现「拉取失败」**：**先怀疑代理 / VPN**。桌宠用 Python 标准库 `urllib` 发请求，会自动继承 `HTTP_PROXY` / `HTTPS_PROXY`、macOS 系统代理、Windows 注册表代理；VPN 客户端改的就是这几处，代理节点连不上国内论坛域名时，4 所学校会同时失败并整体报「拉取失败」。最快验证是退出 VPN 或把 `alumni.qiyuanheshan.com` 加入代理白名单 / `NO_PROXY` 后重启小豚。跑 `python3 diagnose.py`（只读、联网）可自动确认：它会打印当前生效的代理，并在失败时做一次「绕过代理直连」对照，直连能通就直接给出 `DIAGNOSIS_FAIL 代理 / VPN 网络环境`。其余情况再按证书、超时、DNS 的建议处理。气泡高度上限 96px，放不下英文异常，完整原因会写进日志：`bootstrap.py` 启动看 `logs/pet.log`，`.app` 启动看 `~/Library/Logs/tunshuo-pet.log`。贴诊断输出或日志末尾即可，不必截图气泡。
 
 ## 版本与更新提醒
 
@@ -378,9 +382,10 @@ python3 assets/process_sprite.py
 
 | 版本 | 日期 | 内容 |
 |---|---|---|
+| 4.2.2 | 2026-11-12 | 新增 `diagnose.py` 一键网络诊断（含代理 / VPN 检测与直连对照）；拉取失败时完整异常写日志、气泡改人话；修复诊断分类遇到异常对象会崩溃的问题；把 VPN/代理列为排障首项 |
 | 4.2.1 | 2026-11-11 | 修复更新检查在 detached HEAD / 无 upstream 时误报「已是最新」，改为 `UNKNOWN` 静默跳过 |
 | 4.2.0 | 2026-11-11 | 新增 `AGENTS.md` 自动安装说明、`bootstrap.py` 一键补依赖、Windows 支持（托盘通知 / 字体 / `start_windows.bat`）、`VERSION` 版本戳与三层更新提醒 |
-| 4.1.x 及更早 | 2026-11-11 前 | 榜单「最新 / 最热」切换、播报口径统一为时间最新、36 项面板离屏自测、四校圈子真实数据、关节皮肤与动作系统（历史提交见 `git log`） |
+| 4.1.x 及更早 | 2026-11-11 前 | 榜单「最新 / 最热」切换、播报口径统一为时间最新、45 项面板离屏自测、四校圈子真实数据、关节皮肤与动作系统（历史提交见 `git log`） |
 
 ## License
 

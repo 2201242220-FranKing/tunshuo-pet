@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""豚说小豚 · 面板与播报离线自测（36 项）。
+"""豚说小豚 · 面板、播报与拉取失败提示离线自测（45 项）。
 
   python3 selftest_panel.py
 
@@ -122,6 +122,7 @@ class FakePanel:
 class FakePet:
     _on_posts = m.PetWindow._on_posts
     on_click = m.PetWindow.on_click
+    _on_fetch_fail = m.PetWindow._on_fetch_fail
 
     def __init__(self):
         self.seen = set()
@@ -159,5 +160,23 @@ check("单击文案不再提最火/热度",
       "最火" not in click_pet.said[-1] and "热度" not in click_pet.said[-1])
 check("单击文案显示时间与作者",
       "11-11 17:30" in click_pet.said[-1] and "甲" in click_pet.said[-1])
+
+print("8) 拉取失败提示（真实 _on_fetch_fail 代码路径）")
+import contextlib
+import io
+
+fail_pet = FakePet()
+buf = io.StringIO()
+with contextlib.redirect_stdout(buf):
+    fail_pet._on_fetch_fail("[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed")
+check("气泡给出归类后的人话", "证书验证失败" in fail_pet.said[-1], fail_pet.said[-1])
+check("气泡指引跑诊断脚本", "diagnose.py" in fail_pet.said[-1])
+check("气泡不再塞完整英文异常", "CERTIFICATE_VERIFY_FAILED" not in fail_pet.said[-1])
+check("完整原因写进日志", "CERTIFICATE_VERIFY_FAILED" in buf.getvalue())
+check("分类：超时", m._failure_hint("timed out") == "请求超时")
+check("分类：DNS", m._failure_hint("[Errno 8] nodename nor servname provided") == "连不上论坛（DNS）")
+check("分类：代理", m._failure_hint("ProxyError") == "代理设置问题")
+check("分类：HTTP 异常", m._failure_hint("接口 HTTP 502") == "论坛接口异常")
+check("分类：兜底", m._failure_hint("没见过的异常") == "连不上论坛")
 
 print("\nSELFTEST_PANEL_OK %d 项通过" % ok)

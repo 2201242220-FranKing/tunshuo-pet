@@ -80,10 +80,27 @@ python3 tunshuo_pet_pro.py         # 用后台任务方式启动，会话可继�
 ```bash
 python3 bootstrap.py --check        # 环境体检：只读，输出 ENV_OK / ENV_MISSING
 python3 forum_api.py --selftest     # 接口层 67 项离线自测
-python3 selftest_panel.py           # 面板 / 播报 36 项离屏自测，不弹窗
+python3 selftest_panel.py           # 面板 / 播报 45 项离屏自测，不弹窗
+python3 diagnose.py --selftest      # 错误分类自测，不联网
 ```
 
-三项全过才算装好；不通过就按报错修，不要跳过、不要降低标准。
+以上自检全过才算装好；不通过就按报错修，不要跳过、不要降低标准。
+
+**桌宠启动后若出现「拉取失败」，不用问用户，直接排障**：
+
+```bash
+python3 diagnose.py                 # 只读、联网：DNS → HTTPS → 真实聚合拉取
+```
+
+诊断会先打印**当前生效的代理 / VPN**（`HTTP_PROXY` / `HTTPS_PROXY`、macOS 系统代理、Windows 注册表代理，
+Python 的 `urlopen` 会自动继承）。若检测到代理且请求失败，脚本会自动做一次「绕过代理直连」对照：
+直连能通就明确输出 `DIAGNOSIS_FAIL 代理 / VPN 网络环境`，此时**优先让用户退出 VPN 或把
+`alumni.qiyuanheshan.com` 加入代理白名单 / `NO_PROXY`，然后重启小豚**——这是实测最常见的原因，
+不要先去装证书、换依赖或改 `config.json`。
+
+最后一行是 `DIAGNOSIS_OK` 或 `DIAGNOSIS_FAIL`，并附可照做的建议。按建议自行补齐环境即可；
+仍失败、或需要改 `config.json` 默认值时，把**完整诊断输出**和 `logs/pet.log` 末尾贴给用户。
+不要截图气泡——气泡高度只有 96px，异常文本会被截断。
 
 ### 4. 检查更新，并按固定话术提醒用户
 
