@@ -273,7 +273,8 @@ class Fetcher(QThread):
         try:
             self.ok.emit(self.source.fetch())
         except Exception as ex:
-            self.fail.emit(str(ex)[:80])
+            # 完整异常写进日志，便于区分证书 / 代理 / DNS；气泡只显示归类后的人话
+            self.fail.emit(str(ex)[:400])
 
 
 def _failure_hint(msg):

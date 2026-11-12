@@ -3,7 +3,7 @@
 豚说校园论坛的桌面宠物：一只蓝色小鲸鱼常驻桌面右下角，会播报最新帖、随机做待机动作，也能被拖拽、投喂。**macOS / Windows 10·11 共用同一份源码**，Linux 桌面为实验性支持。当前版本先在本地跑通体验，后续再迁移到小程序端。
 
 仓库：https://github.com/2201242220-FranKing/tunshuo-pet
-当前版本：见仓库根 `VERSION`（v4.2.3）
+当前版本：见仓库根 `VERSION`（v4.2.4）
 
 ## 分享给别人：一句话就够
 
@@ -48,6 +48,13 @@
 **不支持**：32 位 Python、Python 3.8 及以下 / 3.14 及以上、Windows 7/8、无图形界面的服务器、手机端。
 首次 `pip install` 会下载约 133 MB 的 PySide6 轮子，网速慢时可能要十几分钟，属正常现象。
 
+> **macOS 用 python.org 安装包时必看**：装完 Python 还要跑一次官方
+> `/Applications/Python 3.x/Install Certificates.command`，否则本机 Python 没有根证书，
+> 所有 HTTPS 都会报 `CERTIFICATE_VERIFY_FAILED` —— 症状是桌宠装得上、起得来，一点刷新就失败。
+> 不用手动判断：`bootstrap.py` 安装时会自动做一次只读 HTTPS 探活，报 `CERT_MISSING` 时执行
+> `python3 bootstrap.py --fix-certs` 即可（修的是 Python 本体，`.venv` 不用重建）。
+> 这是本机环境问题，与 VPN / 代理无关，也不需要给桌宠新增依赖。
+
 ### 依赖包（`requirements.txt`）
 
 | 包 | 版本 | 用途 | 运行必需 |
@@ -81,9 +88,11 @@ cd tunshuo-pet
 python3 bootstrap.py              # Windows PowerShell / CMD 用：py -3 bootstrap.py
 ```
 
-它自动建 `.venv`、补齐缺失依赖、**生成桌面 / 应用里的启动图标**、后台启动桌宠，命令立即返回，
-日志在 `logs/pet.log`。只装环境不启动用 `python3 bootstrap.py --setup`（图标同样会生成）；
-只读体检用 `python3 bootstrap.py --check`（不写盘）。
+它自动建 `.venv`、补齐缺失依赖、**做一次只读 HTTPS 证书探活**、**生成桌面 / 应用里的启动图标**、
+后台启动桌宠，命令立即返回，日志在 `logs/pet.log`。只装环境不启动用
+`python3 bootstrap.py --setup`（图标同样会生成）；只读体检用 `python3 bootstrap.py --check`（不写盘）。
+若体检输出 `CERT_MISSING`（本机 Python 缺根证书），执行 `python3 bootstrap.py --fix-certs`
+自动定位并运行官方证书脚本，输出 `CERT_FIX_OK` 后重启小豚即可；这一步不会改项目依赖或配置。
 
 图标由 `make_shortcut.py` 生成，**只用标准库和系统自带能力**，在本机创建、绑定本机 Python 与源码目录：
 macOS 得 `~/Applications/豚说小豚.app` + 桌面同名符号链接；Windows 得桌面「豚说小豚.lnk」
@@ -236,9 +245,11 @@ python3 make_app.py
 **自检命令**（都不写任何配置）：
 
 ```bash
+python3 bootstrap.py --check                             # 只读体检：依赖 + 证书链 + 一次 HTTPS 探活
+python3 bootstrap.py --fix-certs                         # 体检报 CERT_MISSING 时修复本机 Python 根证书
 python3 forum_api.py --selftest                          # 73 项离线自测，不发网络请求
 python3 selftest_panel.py                                # 45 项离屏 UI 自测，检查榜单切换与播报口径
-python3 diagnose.py --selftest                           # 错误分类自测，不联网
+python3 diagnose.py --selftest                           # 错误分类与证书链自测（16 项），不联网
 python3 diagnose.py                                      # 拉取失败时的一键网络诊断（只读、联网）
 python3 forum_api.py --live --circle-id <学校圈子ID>     # 真实只读联调，作者自动打码
 python3 forum_api.py --live --all                        # 不带圈子 ID，拉全站（仅验证用）
@@ -301,7 +312,7 @@ python3 enable_forum.py --circle-id <圈子ID> --apply         # 旧写法：只
 - **播报口径已统一为发布时间最新的一条**：来新帖时取新帖里时间最新的（原来是热度最高），气泡与系统通知显示时间；单击桌宠也由「现在最火的是」改为「最新的一条是」，同样显示时间与作者。榜单「最新」、新帖播报、单击播报三处现在共用同一个 `post_time_key()`。
 - 两个模式都不显示对方模式的排序值，避免 336px 面板里第二行被挤断。接口仍不返回 `url`，双击条目依旧打不开原帖（待技术给 H5 规则，或改用已有的匿名 `detail` 接口做面板内详情）。
 
-回归自测：`python3 forum_api.py --selftest`（67 项，接口层）与 `python3 selftest_panel.py`（45 项，离屏检查榜单切换与三处播报口径）都不联网、不写配置、不弹窗。
+回归自测：`python3 forum_api.py --selftest`（73 项，接口层）、`python3 selftest_panel.py`（45 项，离屏检查榜单切换与三处播报口径）、`python3 diagnose.py --selftest`（16 项，错误分类与证书链）都不联网、不写配置、不弹窗。
 
 ## 目录结构
 
@@ -309,7 +320,7 @@ python3 enable_forum.py --circle-id <圈子ID> --apply         # 旧写法：只
 tunshuo-pet/
 ├── AGENTS.md              给对方 AI agent 的自动安装说明书（分享时只需发仓库）
 ├── VERSION                版本戳；更新检查与 .app 版本号都读它
-├── bootstrap.py           全平台一键安装：建 venv / 补齐依赖 / 生成图标 / 后台启动
+├── bootstrap.py           全平台一键安装：建 venv / 补齐依赖 / 证书体检与 --fix-certs / 生成图标 / 后台启动
 ├── make_shortcut.py       自动生成桌面 / 应用启动图标（三平台，幂等，bootstrap 自动调用）
 ├── check_update.py        只读更新检查（git fetch / rev-list / show，绝不自动 pull）
 ├── start_windows.bat      Windows 双击启动器
@@ -322,7 +333,7 @@ tunshuo-pet/
 ├── forum_api.py           论坛 REST 适配层（真实字段已校准，默认不启用，可离线/联网自检）
 ├── enable_forum.py        论坛接口启用/回退/增删学校/逐校体检（默认只预览，--apply 才写配置）
 ├── selftest_panel.py      榜单切换与播报口径的离屏自测（45 项，不联网不写盘）
-├── diagnose.py            拉取失败一键诊断（只读、联网，输出 DIAGNOSIS_OK / FAIL）
+├── diagnose.py            拉取失败一键诊断（证书链 / 代理 / DNS，输出 DIAGNOSIS_OK / FAIL）
 ├── 论坛接口待确认清单.txt   可直接转发技术的追问清单（含已实测通过的项）
 ├── make_app.py            macOS .app 打包脚本（仅 macOS）
 ├── config.json            用户配置（入库）
@@ -358,8 +369,9 @@ python3 assets/process_sprite.py
 - `assets/skins/placeholder/` 是**程序从现有 `pet.png` 切出来的技术验证包**，不是最终美术：小角度（头 ≤10°、手 ≤35°）没有破洞，角度再大会露出同色底补的月牙。正式皮肤请按 `tunshuo-pet-studio/JOINT_SPEC.md` 重画挖空底图与部件层，直接放进工作台替换即可，代码不用改。
 - 无边框透明窗口必须关掉系统投影（`Qt.NoDropShadowWindowHint`），否则动作播放、遮罩变矩形时，macOS 会在角色背后投出一块灰黑方块。
 - 若启动后没有反应：用 `bootstrap.py` 启动的看 `logs/pet.log`，用 macOS `.app` 启动的看 `~/Library/Logs/tunshuo-pet.log`；也可先跑 `python3 bootstrap.py --check` 确认依赖齐全。
+- **本机 Python 缺根证书（macOS python.org 版最常见，已实测）**：症状是 `[SSL: CERTIFICATE_VERIFY_FAILED] ... unable to get local issuer certificate`，浏览器能打开但 Python 打不开，与网络 / VPN 无关，内置的「代理失败直连重试」容错**覆盖不了这一类**。`bootstrap.py` 安装时会自动体检并报 `CERT_MISSING`，执行 `python3 bootstrap.py --fix-certs` 即可（自动定位并运行官方 `Install Certificates.command`，修的是 Python 本体，`.venv` 不用重建）。不要关闭证书校验，也不要擅自新增 `certifi` 依赖。
 - **网络与代理 / VPN**：桌宠用 Python 标准库 `urllib` 发请求，会自动继承 `HTTP_PROXY` / `HTTPS_PROXY`、macOS 系统代理、Windows 注册表代理（VPN 客户端改的就是这几处）。**已内置容错**：论坛请求走代理失败时，会绕过代理对同一 URL 直连重试一次——不改系统代理设置、不关证书校验、不写配置，所以开着 VPN 通常也能正常出榜；没走代理的失败不会重复请求，直连也失败则保留原始异常便于定位。
-- **仍出现「拉取失败」**：跑 `python3 diagnose.py`（只读、联网），它会打印当前生效的代理，并在失败时做一次「绕过代理直连」对照，直连能通就给出 `DIAGNOSIS_FAIL 代理 / VPN 网络环境`。诊断如实反映网络环境，**报告代理不通不代表桌宠坏了**；只有桌宠确实拉不到时，才考虑退出 VPN / 换节点 / 把 `alumni.qiyuanheshan.com` 加入代理白名单或 `NO_PROXY` 后重启，其余再按证书、超时、DNS 的建议处理。气泡高度上限 96px，放不下英文异常，完整原因会写进日志：`bootstrap.py` 启动看 `logs/pet.log`，`.app` 启动看 `~/Library/Logs/tunshuo-pet.log`。贴诊断输出或日志末尾即可，不必截图气泡。
+- **仍出现「拉取失败」**：跑 `python3 diagnose.py`（只读、联网），**按输出的分类处理，不要一律去关 VPN**：`证书验证失败` → 跑 `--fix-certs`；`代理 / VPN 网络环境` → 桌宠已内置直连兜底，先确认是否真的仍拉不到，确实拉不到再退出 VPN / 换节点 / 把 `alumni.qiyuanheshan.com` 加入白名单或 `NO_PROXY`；`域名解析失败` / `请求超时` → 换网络；`服务端或防火墙拒绝` → 稍后重试。诊断会打印证书链文件是否存在、当前生效的代理，并在失败时做「绕过代理直连」对照。气泡高度上限 96px，放不下英文异常，完整原因会写进日志：`bootstrap.py` 启动看 `logs/pet.log`，`.app` 启动看 `~/Library/Logs/tunshuo-pet.log`。贴诊断输出或日志末尾即可，不必截图气泡。
 
 ## 版本与更新提醒
 
@@ -396,6 +408,7 @@ python3 assets/process_sprite.py
 
 | 版本 | 日期 | 内容 |
 |---|---|---|
+| 4.2.4 | 2026-11-12 | 修正首个外部用户「拉取失败」的真实根因（python.org 版 macOS Python 缺根证书，非 VPN）：`bootstrap.py` 加证书体检与显式 `--fix-certs`；`diagnose.py` 检查证书链文件并给出精确官方脚本；`AGENTS.md` / README 排障改为按错误类型分流；放宽三层异常截断让完整证书错误进日志；诊断自测 12 → 16 项 |
 | 4.2.3 | 2026-11-12 | 论坛请求在代理 / VPN 不通时自动直连重试一次（不关 VPN 也能出榜）；新增 `make_shortcut.py`，安装时自动在桌面 / 应用生成本机启动图标（macOS `.app`、Windows `.lnk`、Linux `.desktop`）；接口层自测 67 → 73 项 |
 | 4.2.2 | 2026-11-12 | 新增 `diagnose.py` 一键网络诊断（含代理 / VPN 检测与直连对照）；拉取失败时完整异常写日志、气泡改人话；修复诊断分类遇到异常对象会崩溃的问题；把 VPN/代理列为排障首项 |
 | 4.2.1 | 2026-11-11 | 修复更新检查在 detached HEAD / 无 upstream 时误报「已是最新」，改为 `UNKNOWN` 静默跳过 |

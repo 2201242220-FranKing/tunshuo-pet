@@ -316,9 +316,11 @@ def _default_transport(url, headers, timeout=10):
     except urllib.error.HTTPError as e:
         first = ForumError("接口 HTTP %s" % e.code)
     except urllib.error.URLError as e:
-        first = ForumError("连不上论坛：%s" % str(e.reason)[:40])
+        # 保留完整异常：日志要能看出 CERTIFICATE_VERIFY_FAILED 这类根因，
+        # 气泡另由 PetWindow._failure_hint() 归类成一句人话，不受长度影响。
+        first = ForumError("连不上论坛：%s" % str(e.reason)[:120])
     except Exception as e:
-        first = ForumError("请求失败：%s" % str(e)[:40])
+        first = ForumError("请求失败：%s" % str(e)[:120])
 
     if not _proxy_applies(url):
         raise first
@@ -554,7 +556,8 @@ class ForumAdapter:
             # 所有圈子都失败：有旧数据就沿用，避免热帖榜被清空；否则才报错。
             if self._last:
                 return list(self._last)
-            raise ForumError("；".join(errors)[:80] or "没有取到帖子")
+            # 4 所学校全失败时别把第一条错误截成碎片，日志要能看到完整根因
+            raise ForumError("；".join(errors)[:400] or "没有取到帖子")
 
         merged = {}
         for p in posts:                      # 十大热帖先入，保证榜单优先级

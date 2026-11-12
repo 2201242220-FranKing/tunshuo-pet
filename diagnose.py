@@ -4,7 +4,8 @@
 豚说小豚 · 拉取失败一键诊断
 
 只读、不写文件、不改 config.json、不新增依赖、不打印任何令牌值。
-依次检查：运行环境（含代理 / VPN）→ DNS → 一次 HTTPS 请求 → 一次真实聚合拉取。
+依次检查：运行环境（含证书链文件与代理 / VPN）→ DNS → 一次 HTTPS 请求 → 一次真实聚合拉取。
+证书链文件缺失 / 为空会直接标注；证书错误与代理错误分开归类，两者解法完全不同。
 检测到代理且默认请求失败时，会额外做一次「绕过代理直连」对照，直接判定是不是 VPN 导致。
 
 用法：
@@ -31,6 +32,51 @@ import urllib.request
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(APP_DIR, "config.json")
 DEFAULT_BASE = "https://alumni.qiyuanheshan.com"
+
+
+def find_install_certificates_script():
+    """定位 macOS python.org 安装包的官方证书脚本；找不到返回空串。
+
+    只供离线自测用 TUNSHUO_CERT_SCRIPT 覆盖路径，正常安装时不读该变量。
+    """
+    override = (os.environ.get("TUNSHUO_CERT_SCRIPT") or "").strip()
+    if override:
+        return override if os.path.isfile(override) else ""
+    if sys.platform != "darwin":
+        return ""
+    import glob
+    ver = "%d.%d" % sys.version_info[:2]
+    candidates = ["/Applications/Python %s/Install Certificates.command" % ver]
+    candidates += sorted(glob.glob("/Applications/Python 3.*/Install Certificates.command"))
+    for path in candidates:
+        if os.path.isfile(path):
+            return path
+    return ""
+
+
+def certificate_state():
+    """只读检查本机证书链文件，返回 (标记, 路径, 说明)。
+
+    标记只表示「可疑」，最终判定以真实 HTTPS 请求为准：有些平台由系统目录
+    提供根证书，cafile 为空也属正常，不能单凭文件不存在就下结论。
+    """
+    override = (os.environ.get("SSL_CERT_FILE") or "").strip()
+    try:
+        cafile = override or ssl.get_default_verify_paths().cafile or ""
+    except Exception as e:
+        return "UNKNOWN", "", "读取证书路径失败：%s" % e
+    if not cafile:
+        return "UNKNOWN", "", "由系统提供（未暴露 cafile 路径）"
+    if not os.path.isfile(cafile):
+        return "SUSPECT", cafile, "证书文件不存在（python.org 版 macOS Python 常见）"
+    try:
+        size = os.path.getsize(cafile)
+    except OSError as e:
+        return "UNKNOWN", cafile, "无法读取：%s" % e
+    if size < 128:
+        return "SUSPECT", cafile, "证书文件过小（%d 字节），可能为空" % size
+    return "OK", cafile, "文件存在（%d 字节）%s" % (
+        size, "，来自 SSL_CERT_FILE 覆盖" if override else "")
 
 
 def mask_proxy(value):
@@ -83,11 +129,16 @@ def classify(msg, has_proxy=False, direct_ok=False):
             "不要关闭证书校验（verify=False），也不要改 config.json。",
         ]
     if "certificate" in s or "ssl" in s or "cafile" in s:
+        official = find_install_certificates_script()
         return "证书验证失败", [
-            "浏览器能打开、Python 打不开，通常是本机 Python 缺根证书，不是论坛挂了。",
-            "macOS 若用 python.org 安装包：运行 /Applications/Python 3.x/Install Certificates.command，然后重建 .venv。",
-            "通用做法：pip install certifi，再设环境变量 SSL_CERT_FILE 指向 certifi.where() 后重启小豚。",
-            "不要改成关闭证书校验（verify=False），会牺牲安全性。",
+            "浏览器能打开、Python 打不开，通常是本机 Python 缺根证书；不是论坛挂了，也不是 VPN。",
+            ("macOS python.org 安装包：执行官方脚本 \"%s\"" % official) if official
+            else "macOS python.org 安装包：运行 /Applications/Python 3.x/Install Certificates.command",
+            "该脚本会安装 certifi 并把 cert.pem 软链到 framework 的 openssl 目录；"
+            "修的是 Python 本体，.venv 不用重建，重启小豚即可生效。",
+            "也可让 agent 直接执行：python3 bootstrap.py --fix-certs（自动定位并运行官方脚本后复检）。",
+            "兜底（属于新增依赖，需用户同意）：pip install certifi，再把 SSL_CERT_FILE 指向 certifi.where()。",
+            "不要关闭证书校验（verify=False），会牺牲安全性；也不要改 config.json。",
         ]
     if "timed out" in s or "timeout" in s:
         return "请求超时", [
@@ -130,6 +181,9 @@ def _fail(detail, base, has_proxy=False, direct_ok=False):
     if reason == "代理 / VPN 网络环境":
         print("\n注意：桌宠本身已内置「代理失败自动直连重试」，所以即便这里判定代理不通，"
               "桌宠刷新仍可能正常出榜——本诊断如实反映网络环境，不影响使用。")
+    if reason == "证书验证失败":
+        print("\n结论      ：CERT_MISSING 本机 Python 根证书不可用，与 VPN / 代理无关；"
+              "内置的「代理失败自动直连重试」容错覆盖不了这一类，必须先修证书。")
     print("\n快速二分：用浏览器打开 %s" % base)
     print("浏览器能开但这里失败 = 本机 Python / 证书 / 代理问题；浏览器也开不了 = 网络或服务端问题。")
     return 1
@@ -165,6 +219,40 @@ def _selftest():
                   has_proxy=True)[0] == "代理 / VPN 网络环境",
          "异常对象未正确分类"),
     ]
+    # 证书链自检：用临时文件模拟缺失 / 空文件 / 正常，跑完还原环境变量
+    import tempfile
+    saved_cert = os.environ.get("SSL_CERT_FILE")
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            missing = os.path.join(tmp, "nope.pem")
+            os.environ["SSL_CERT_FILE"] = missing
+            extra.append((certificate_state()[0] == "SUSPECT",
+                          "certificate_state 未识别缺失证书"))
+            empty = os.path.join(tmp, "empty.pem")
+            open(empty, "wb").close()
+            os.environ["SSL_CERT_FILE"] = empty
+            extra.append((certificate_state()[0] == "SUSPECT",
+                          "certificate_state 未识别空证书"))
+            good = os.path.join(tmp, "good.pem")
+            with open(good, "wb") as f:
+                f.write(b"x" * 256)
+            os.environ["SSL_CERT_FILE"] = good
+            extra.append((certificate_state()[0] == "OK",
+                          "certificate_state 误判正常证书"))
+    finally:
+        if saved_cert is None:
+            os.environ.pop("SSL_CERT_FILE", None)
+        else:
+            os.environ["SSL_CERT_FILE"] = saved_cert
+    saved_script = os.environ.get("TUNSHUO_CERT_SCRIPT")
+    os.environ["TUNSHUO_CERT_SCRIPT"] = os.path.abspath(__file__)
+    extra.append((find_install_certificates_script() == os.path.abspath(__file__),
+                  "官方脚本定位覆盖路径失效"))
+    if saved_script is None:
+        os.environ.pop("TUNSHUO_CERT_SCRIPT", None)
+    else:
+        os.environ["TUNSHUO_CERT_SCRIPT"] = saved_script
+
     for good, label in extra:
         if good:
             ok += 1
@@ -184,10 +272,9 @@ def main():
     print("平台      ：%s %s" % (platform.system(), platform.release()))
     print("Python    ：%s" % platform.python_version())
     print("解释器    ：%s" % sys.executable)
-    try:
-        print("证书链    ：%s" % (ssl.get_default_verify_paths().cafile or "（由系统提供）"))
-    except Exception as e:
-        print("证书链    ：读取失败 %s" % e)
+    cflag, cpath, cdetail = certificate_state()
+    print("证书链    ：%s%s" % (cpath or "（由系统提供）",
+                              "" if cflag == "OK" else "  ← %s" % cdetail))
 
     cfg = {}
     try:
